@@ -1,0 +1,165 @@
+# Authoritative T1 economic event calendar for MFFU compliance.
+#
+# MFFU's official T1 list (for NQ / equity index futures traders):
+#   - FOMC Meeting (rate decision day)
+#   - FOMC Minutes
+#   - Employment Report (released as "Employment Situation" by BLS)
+#   - CPI
+# (EIA and Agricultural reports are T1 for energy/ag traders only.)
+#
+# Source verification:
+#   FOMC dates: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+#   Empl Situation: https://www.bls.gov/schedule/news_release/empsit.htm
+#                   + Schedule of Release Dates for Principal Federal Economic Indicators (whitehouse.gov)
+#   CPI: https://www.bls.gov/schedule/news_release/cpi.htm
+#
+# Last updated: 2026-05-25 (covering remainder of 2026 + early 2027 stub).
+# Re-verify quarterly. Events marked "estimated" must be confirmed against official source.
+#
+# Times are in America/New_York (ET) — the loader converts to UTC for the gate.
+# FOMC rate decisions are at 14:00 ET; FOMC Minutes at 14:00 ET (Wed, 3 weeks post-meeting);
+# Employment Situation + CPI at 08:30 ET.
+
+events:
+  # === FOMC RATE DECISIONS (second day of two-day meeting, 14:00 ET) ===
+  - name: "FOMC Meeting"
+    date: 2026-06-17
+    time_et: "14:00"
+    source: federalreserve.gov
+    verified: true
+  - name: "FOMC Meeting"
+    date: 2026-07-29
+    time_et: "14:00"
+    source: federalreserve.gov
+    verified: true
+  - name: "FOMC Meeting"
+    date: 2026-09-16
+    time_et: "14:00"
+    source: federalreserve.gov
+    verified: true
+  - name: "FOMC Meeting"
+    date: 2026-10-28
+    time_et: "14:00"
+    source: federalreserve.gov
+    verified: true
+  - name: "FOMC Meeting"
+    date: 2026-12-09
+    time_et: "14:00"
+    source: federalreserve.gov
+    verified: true
+  - name: "FOMC Meeting"
+    date: 2027-01-27
+    time_et: "14:00"
+    source: federalreserve.gov
+    verified: true
+
+  # === FOMC MINUTES (3 weeks after each meeting, Wed 14:00 ET — ESTIMATED for H2) ===
+  - name: "FOMC Minutes"
+    date: 2026-07-08
+    time_et: "14:00"
+    source: estimated_3wk_post_meeting
+    verified: false
+  - name: "FOMC Minutes"
+    date: 2026-08-19
+    time_et: "14:00"
+    source: estimated_3wk_post_meeting
+    verified: false
+  - name: "FOMC Minutes"
+    date: 2026-10-07
+    time_et: "14:00"
+    source: estimated_3wk_post_meeting
+    verified: false
+  - name: "FOMC Minutes"
+    date: 2026-11-18
+    time_et: "14:00"
+    source: estimated_3wk_post_meeting
+    verified: false
+  - name: "FOMC Minutes"
+    date: 2026-12-30
+    time_et: "14:00"
+    source: estimated_3wk_post_meeting
+    verified: false
+  - name: "FOMC Minutes"
+    date: 2027-02-17
+    time_et: "14:00"
+    source: estimated_3wk_post_meeting
+    verified: false
+
+  # === EMPLOYMENT SITUATION (BLS, 08:30 ET) ===
+  - name: "Employment Situation"
+    date: 2026-06-05
+    time_et: "08:30"
+    source: bls.gov
+    verified: true
+  - name: "Employment Situation"
+    date: 2026-07-02     # Thursday — July 3 is holiday observed
+    time_et: "08:30"
+    source: bls.gov
+    verified: true
+  - name: "Employment Situation"
+    date: 2026-08-07
+    time_et: "08:30"
+    source: bls.gov
+    verified: true
+  - name: "Employment Situation"
+    date: 2026-09-04
+    time_et: "08:30"
+    source: bls.gov
+    verified: true
+  - name: "Employment Situation"
+    date: 2026-10-02
+    time_et: "08:30"
+    source: bls_first_friday_estimated
+    verified: false
+  - name: "Employment Situation"
+    date: 2026-11-06
+    time_et: "08:30"
+    source: bls_first_friday_estimated
+    verified: false
+  - name: "Employment Situation"
+    date: 2026-12-04
+    time_et: "08:30"
+    source: bls_first_friday_estimated
+    verified: false
+  - name: "Employment Situation"
+    date: 2027-01-08
+    time_et: "08:30"
+    source: bls_first_friday_estimated
+    verified: false
+
+  # === CPI (BLS, 08:30 ET) — full year confirmed via cpiinflationcalculator.com mirror ===
+  - name: "CPI"
+    date: 2026-06-10
+    time_et: "08:30"
+    source: bls.gov
+    verified: true
+  - name: "CPI"
+    date: 2026-07-14
+    time_et: "08:30"
+    source: bls.gov
+    verified: true
+  - name: "CPI"
+    date: 2026-08-12
+    time_et: "08:30"
+    source: bls.gov
+    verified: true
+  - name: "CPI"
+    date: 2026-09-11
+    time_et: "08:30"
+    source: bls.gov
+    verified: true
+  - name: "CPI"
+    date: 2026-10-14
+    time_et: "08:30"
+    source: bls.gov
+    verified: true
+  - name: "CPI"
+    date: 2026-11-10
+    time_et: "08:30"
+    source: bls.gov
+    verified: true
+  - name: "CPI"
+    date: 2026-12-10
+    time_et: "08:30"
+    source: bls.gov
+    verified: true
