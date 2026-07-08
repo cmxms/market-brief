@@ -1,0 +1,7 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+data/
+_harvest/
+# briefs/ is intentionally committed — it's the shareable archive of past briefs.
