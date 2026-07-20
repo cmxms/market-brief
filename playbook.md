@@ -20,6 +20,13 @@ calls: it informs the reader's own regime call.
    *why* and surface catalysts the numbers can't. Always cover:
    - the dominant fresh headlines from Finnhub (verify + add depth),
    - the live themes: **AI / NVDA / semis, the Fed/CPI, oil/geopolitics**,
+   - **TODAY's scheduled econ calendar — non-T1 releases AND Fed speakers.** The gather
+     block's event gate is **T1-ONLY** (`t1_calendar.yaml` = FOMC/CPI/jobs) and will NOT
+     list **PPI, retail sales, PCE, jobless claims, ISM, or scheduled Fed-speaker/Chair
+     appearances/testimony**. These move the tape and MUST be caught here or they slip the
+     brief entirely. Every run, do a dated search like `"US economic calendar {today}"` +
+     `"Fed speakers {today}"` (TradingView's econ calendar is the lean source) and fold any
+     hits into 📰 Last 24h and 🚨 Event gate. Don't assume the T1 gate = the whole calendar.
    - the next T1 event's setup.
    Macro-only searches miss sector catalysts — search the themes explicitly.
    - **MONDAYS / post-holiday opens: dig harder on headlines.** A lot moves over a
@@ -49,6 +56,19 @@ calls: it informs the reader's own regime call.
   until you've verified which source is right. "Only one source" = degraded but usable.
 - **Hold two-sided tension.** If there's a bullish counterweight to a bearish tape (or
   vice-versa), show both. Don't write a one-note story.
+- **LENGTH CEILING — hard: ~800 words / ~5,000 chars.** Reference briefs: `2026-07-13`
+  (4.3k) and `2026-07-14` (5.1k) are the house style — go re-read one before writing.
+  Anchor on THOSE, never on yesterday's brief; anchoring on yesterday ratchets (7/13 4.3k
+  → 7/17 9.5k, 2.2x, purely by "just a little more" each day). Over ceiling = cut, don't
+  justify.
+- **NEVER publish process notes.** Source-verification work (cross-check mismatches, which
+  feed was stale, unconfirmed calendar entries), data-integrity caveats, and methodology
+  belong in the CLI summary to the user — **not in the brief.** Readers want the number,
+  not the audit trail. Exception: if a number is stale AND you're publishing it anyway,
+  one short clause — "10Y 4.52% (CNBC live)" — never a paragraph.
+- **Don't over-precision a pre-market number.** GEX/flip/walls come from *prior-session*
+  greeks and move at the open. Round them (`~750.7`, not `750.78`). Cent-level precision
+  on a stale-greek number is false confidence.
 
 ## Canonical headers — COPY VERBATIM (do not improvise emoji or wording)
 
@@ -92,17 +112,28 @@ a header — put emphasis in the body.
    (b) the STORY — offense→defense = caution, (c) the SO-WHAT. Assume the reader doesn't
    know what "rel to SPY" or a sector ETF is. Put the ETF grid in a ``` code block.
 4. **Macro pulse** — yields / VIX / VIX9D term structure / oil, as moves not levels.
-5. **🚨 Event gate** — T1 today + this week; bullish/bearish wildcards; what to watch.
+5. **🚨 Event gate** — T1 today + this week, PLUS today's non-T1 scheduled data (PPI,
+   retail sales, PCE, claims, ISM) and any Fed-speaker/Chair appearances from the Step-2
+   calendar sweep; bullish/bearish wildcards; what to watch. The T1 gate in the data block
+   is not the whole calendar — a soft PPI or a hawkish Fed-Chair testimony belongs here.
 6. **Regime read (generalized)** — gamma + vol → what it means for traders (range vs
    trend, where fades/breakouts get punished). Two GEX views are in the data block:
    **near-term** (nearest 4 expirations — the intraday regime, walls, flip) and
    **full-chain** (every expiration — the structural zero-gamma flip). Lead with the
    near-term regime + flip + walls; cite the full-chain flip when it differs meaningfully.
+   **"Meaningfully" means it changes the read** — if the two flips agree (e.g. 750.78 vs
+   750.85), say "structural agrees" in three words or omit it. Don't print both in full.
+   Prose or 2-3 bullets, rounded numbers, NO code block (see FORMAT).
    Generalize — describe the condition, don't tell anyone what to do.
 
 ## FORMAT FOR DISCORD (important — Discord rendering differs from a plain .md)
-- **No markdown tables** — Discord doesn't render them. Put aligned data (the ES/YM/NQ/RTY
-  grid, GEX levels, the rotation grid) in a ``` **code block** so columns line up.
+- **No markdown tables** — Discord doesn't render them. Put aligned data in a ```
+  **code block** so columns line up. **Exactly two code blocks per brief: the ES/YM/NQ/RTY
+  breadth grid and the rotation grid.** That's it.
+- **The regime read gets NO code block.** Weave the 2-3 numbers that matter (flip, call
+  wall, put wall) into prose or 2-3 tight bullets — see `2026-07-14`, which handled the
+  same knife-edge-on-the-flip setup in two bullets. Don't dump the walls list, don't dump
+  near-term AND full-chain side by side.
 - `#`/`##` headers and ``` code blocks DO render natively — use them.
 - Keep it tight; a non-Nitro message caps at **2,000 chars** (`post_discord.py` splits on
   `## ` boundaries automatically, but tighter sections read better).
