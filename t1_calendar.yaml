@@ -13,7 +13,13 @@
 #                   + Schedule of Release Dates for Principal Federal Economic Indicators (whitehouse.gov)
 #   CPI: https://www.bls.gov/schedule/news_release/cpi.htm
 #
-# Last updated: 2026-05-25 (covering remainder of 2026 + early 2027 stub).
+# Last updated: 2026-07-15 (re-verified — was 2026-05-25).
+#   Re-verified 2026-07-15: FOMC meetings thru 2027-01 confirmed vs federalreserve.gov;
+#   CPI Aug–Dec confirmed vs BLS mirrors (cpiinflationcalculator + usinflationcalculator) —
+#   Nov-data CPI is 2026-12-10 (a "Dec 18" rumor was FALSE). Added Dec-data CPI 2027-01-13.
+#   STILL ESTIMATED (BLS/FRED blocked automated fetch; consistent w/ rule, promote next pass):
+#     - FOMC Minutes H2 2026 (3wk-post-meeting rule; Fed shows "not yet scheduled")
+#     - Employment Situation Oct 2026 → Jan 2027 (first-Friday rule; Jan shifts to 2027-01-08).
 # Re-verify quarterly. Events marked "estimated" must be confirmed against official source.
 #
 # Times are in America/New_York (ET) — the loader converts to UTC for the gate.
@@ -162,4 +168,9 @@ events:
     date: 2026-12-10
     time_et: "08:30"
     source: bls.gov
+    verified: true
+  - name: "CPI"
+    date: 2027-01-13     # December 2026 data
+    time_et: "08:30"
+    source: bls_mirror_confirmed
     verified: true
