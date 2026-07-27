@@ -1,0 +1,193 @@
+/* Brief Live — LIGHT layout spike (2026-07-17).
+ *
+ * Provisional 3-column remodel from the Google-Sheets mockup: left = AI analysis
+ * + econ calendar, center = market data, right = portfolio + trades. Priority here
+ * is LAYOUT + whitespace, not a finished palette — direction colors are reused from
+ * the dark board and darkened for contrast on a light surface, but this has NOT been
+ * through the dataviz validation pass. If the layout sticks, do that pass then.
+ *
+ * Direction stays green-up / red-down (finance convention, load-bearing for glance),
+ * always reinforced by an explicit +/- sign so color is never the sole channel.
+ */
+
+:root {
+  --page:      #f3f3f0;   /* warm off-white, softer on the eyes than pure #fff */
+  --panel:     #ffffff;
+  --ink:       #1b1b19;
+  --ink-2:     #44443f;
+  --muted:     #8f8d85;
+  --hair:      #ecebe6;   /* internal hairline dividers */
+  --border:    rgba(0, 0, 0, 0.07);
+  --shadow:    0 1px 2px rgba(0,0,0,.04), 0 4px 16px rgba(0,0,0,.04);
+
+  --up:        #0f8a5f;
+  --down:      #cf4436;
+  --flat:      #8f8d85;
+
+  --warning:   #b9770c;
+  --critical:  #c0362c;
+
+  --r: 14px;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--page);
+  color: var(--ink-2);
+  font-size: 14px;
+  line-height: 1.5;
+  padding: 28px 32px 40px;
+  max-width: 1600px;
+  margin: 0 auto;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- header ------------------------------------------------------------- */
+header {
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding-bottom: 18px; margin-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+}
+h1 { font-size: 16px; font-weight: 600; color: var(--ink); letter-spacing: .01em; }
+h1 span { color: var(--muted); font-weight: 400; }
+.stamp { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* ---- alerts (hidden unless something is wrong) -------------------------- */
+#alerts:empty { display: none; }
+.alert {
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 16px; margin-bottom: 20px;
+  border-radius: 10px;
+  border: 1px solid currentColor;
+  background: var(--panel);
+  font-size: 13px;
+}
+.alert .ico { font-size: 14px; line-height: 1; }
+.alert.warning  { color: var(--warning); }
+.alert.critical { color: var(--critical); }
+.alert b { color: var(--ink); font-weight: 600; }
+
+/* ---- the board: 3 columns, center spans full height -------------------- */
+.board {
+  display: grid;
+  grid-template-columns: 1fr 1.15fr 1fr;
+  gap: 24px;
+  align-items: stretch;
+}
+.col { display: flex; flex-direction: column; gap: 24px; }
+.col .panel { flex: 1; }   /* the two side boxes share the column height evenly */
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  box-shadow: var(--shadow);
+  padding: 24px 26px 26px;
+  display: flex; flex-direction: column;
+}
+
+.panel-head {
+  display: flex; align-items: baseline; gap: 10px;
+  padding-bottom: 16px; margin-bottom: 18px;
+  border-bottom: 1px solid var(--hair);
+}
+.panel h2 {
+  font-size: 11px; font-weight: 700; letter-spacing: .11em;
+  text-transform: uppercase; color: var(--muted);
+}
+.sub { font-size: 11px; color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+.sub-warn { color: var(--warning); }
+.panel-body { flex: 1; }
+
+/* ---- AI analysis -------------------------------------------------------- */
+.analysis-tldr { font-size: 15px; line-height: 1.6; color: var(--ink); }
+.analysis-note {
+  margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--hair);
+  font-size: 11.5px; color: var(--muted);
+}
+
+/* ---- center: market blocks --------------------------------------------- */
+.mkt-block + .mkt-block {
+  margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--hair);
+}
+.mkt-block h3 {
+  font-size: 10px; font-weight: 700; letter-spacing: .10em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 12px;
+}
+.mkt-block h3 .sub { margin-left: 6px; }
+
+/* ---- stat tiles --------------------------------------------------------- */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); gap: 16px; }
+.tile .k { font-size: 10px; color: var(--muted); letter-spacing: .05em; text-transform: uppercase; }
+.tile .v { font-size: 22px; font-weight: 600; color: var(--ink); margin-top: 2px; font-variant-numeric: tabular-nums; }
+.tile .d { font-size: 12px; font-variant-numeric: tabular-nums; margin-top: 2px; }
+
+.up   { color: var(--up); }
+.down { color: var(--down); }
+.flat { color: var(--flat); }
+
+/* ---- fear & greed (stub) ------------------------------------------------ */
+.fg { display: flex; align-items: center; gap: 16px; }
+.fg .num { font-size: 30px; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+.fg .lab { font-size: 12px; color: var(--muted); }
+
+/* ---- rotation: diverging bars around a zero baseline -------------------- */
+.rot { display: flex; flex-direction: column; gap: 3px; }
+.rot-row {
+  display: grid; grid-template-columns: 48px 1fr 54px;
+  align-items: center; gap: 10px; padding: 2px 0;
+}
+.rot-name { font-size: 12px; color: var(--ink-2); font-weight: 500; }
+.rot-track { position: relative; height: 14px; }
+.rot-track::before {
+  content: ""; position: absolute; left: 50%; top: -1px; bottom: -1px;
+  width: 1px; background: var(--hair);
+}
+.rot-bar { position: absolute; top: 3px; height: 8px; }
+.rot-bar.pos { left: 50%; background: var(--up);   border-radius: 0 4px 4px 0; }
+.rot-bar.neg { right: 50%; background: var(--down); border-radius: 4px 0 0 4px; }
+.rot-val { font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ---- events ------------------------------------------------------------- */
+.ev { display: flex; gap: 12px; padding: 9px 0; font-size: 13px; }
+.ev + .ev { border-top: 1px solid var(--hair); }
+.ev .t { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 56px; }
+.ev .n { color: var(--ink-2); }
+.ev.t1 .n { color: var(--warning); font-weight: 600; }
+.ev-note { margin-top: 12px; font-size: 11px; color: var(--muted); }
+
+/* ---- pending / not-wired placeholder ----------------------------------- */
+.pending {
+  height: 100%; min-height: 120px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 6px; text-align: center;
+  border: 1px dashed #dcdbd4; border-radius: 10px;
+  padding: 22px; color: var(--muted); font-size: 12px;
+}
+.pending b { color: var(--ink-2); font-size: 13px; font-weight: 600; }
+
+/* portfolio KPI stub row */
+.kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 18px; }
+.kpi { padding: 4px 0; }
+.kpi .k { font-size: 10px; color: var(--muted); letter-spacing: .05em; text-transform: uppercase; }
+.kpi .v { font-size: 24px; font-weight: 600; color: var(--muted); margin-top: 3px; font-variant-numeric: tabular-nums; }
+
+/* ---- health footer ------------------------------------------------------ */
+.health {
+  display: flex; flex-wrap: wrap; gap: 18px;
+  margin-top: 28px; padding-top: 16px;
+  border-top: 1px solid var(--border);
+  font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.health .f { display: flex; align-items: center; gap: 6px; }
+.health .dot { width: 6px; height: 6px; border-radius: 50%; background: #cfceC6; }
+.health .f.bad  { color: var(--critical); }
+.health .f.bad .dot  { background: var(--critical); }
+
+/* ---- responsive: stack the three columns ------------------------------- */
+@media (max-width: 1080px) {
+  .board { grid-template-columns: 1fr; }
+  body { padding: 20px; }
+}
