@@ -20,13 +20,26 @@ calls: it informs the reader's own regime call.
    *why* and surface catalysts the numbers can't. Always cover:
    - the dominant fresh headlines from Finnhub (verify + add depth),
    - the live themes: **AI / NVDA / semis, the Fed/CPI, oil/geopolitics**,
-   - **TODAY's scheduled econ calendar — non-T1 releases AND Fed speakers.** The gather
-     block's event gate is **T1-ONLY** (`t1_calendar.yaml` = FOMC/CPI/jobs) and will NOT
-     list **PPI, retail sales, PCE, jobless claims, ISM, or scheduled Fed-speaker/Chair
-     appearances/testimony**. These move the tape and MUST be caught here or they slip the
-     brief entirely. Every run, do a dated search like `"US economic calendar {today}"` +
-     `"Fed speakers {today}"` (TradingView's econ calendar is the lean source) and fold any
-     hits into 📰 Last 24h and 🚨 Event gate. Don't assume the T1 gate = the whole calendar.
+   - **TODAY's scheduled econ calendar — what the data block does NOT cover.** As of
+     2026-07-30 the event gate has **two tiers**: T1 (FOMC/minutes/CPI/jobs) and **tier 2**
+     (PCE, GDP, PPI, retail sales, jobless claims), and today's tier-2 releases print at the
+     top of the block in red. **Read that section before searching** — it is now the
+     authority for those five.
+     **Still NOT in the data, and still a manual web sweep every run:**
+       - **ISM** — FRED doesn't carry it (redistribution limits) and ismworld.org's release
+         calendar is behind an SSO login. Its "Manufacturing = 1st business day / Services =
+         3rd, 10:00 ET" rule has real holiday exceptions (Jan 5 2026; July Services moved for
+         the Jul 3 observance), so **don't hand-write ISM dates into the YAML** — search for
+         it on the day.
+       - **Scheduled Fed-speaker / Chair appearances and testimony** — and check whether a
+         **blackout** is in force, because then there are none (7/30 was inside one).
+       - **One-off and second-tier prints** — UMich sentiment, CB consumer confidence,
+         Chicago PMI, ECI, durable goods, Treasury refunding. The 7/17 brief lost the 10:00
+         UMich print exactly here.
+     Every run, do a dated search like `"US economic calendar {today}"` + `"Fed speakers
+     {today}"` (TradingView's econ calendar is the lean source) and fold hits into 📰 Last 24h
+     and 🚨 Event gate. **`today_is_t1: False` means "not a prop-firm restricted day" — it has
+     never meant "nothing happens today."**
    - the next T1 event's setup.
    Macro-only searches miss sector catalysts — search the themes explicitly.
    - **MONDAYS / post-holiday opens: dig harder on headlines.** A lot moves over a

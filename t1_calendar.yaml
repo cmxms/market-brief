@@ -1,26 +1,62 @@
-# Authoritative T1 economic event calendar for MFFU compliance.
+# Economic event calendar for the market brief.
 #
-# MFFU's official T1 list (for NQ / equity index futures traders):
-#   - FOMC Meeting (rate decision day)
-#   - FOMC Minutes
-#   - Employment Report (released as "Employment Situation" by BLS)
-#   - CPI
-# (EIA and Agricultural reports are T1 for energy/ag traders only.)
+# TWO TIERS — they answer different questions. Don't merge them.
 #
-# Source verification:
-#   FOMC dates: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
-#   Empl Situation: https://www.bls.gov/schedule/news_release/empsit.htm
-#                   + Schedule of Release Dates for Principal Federal Economic Indicators (whitehouse.gov)
-#   CPI: https://www.bls.gov/schedule/news_release/cpi.htm
+#   events (T1)  = MFFU's prop-firm restricted-trading list. "T1" means you are
+#                  BLOCKED FROM TRADING around it, not "it moves the market."
+#                    - FOMC Meeting (rate decision day)
+#                    - FOMC Minutes
+#                    - Employment Report ("Employment Situation" at BLS)
+#                    - CPI
+#                  (EIA + Agricultural are T1 for energy/ag traders only.)
 #
-# Last updated: 2026-07-15 (re-verified — was 2026-05-25).
-#   Re-verified 2026-07-15: FOMC meetings thru 2027-01 confirmed vs federalreserve.gov;
-#   CPI Aug–Dec confirmed vs BLS mirrors (cpiinflationcalculator + usinflationcalculator) —
-#   Nov-data CPI is 2026-12-10 (a "Dec 18" rumor was FALSE). Added Dec-data CPI 2027-01-13.
-#   STILL ESTIMATED (BLS/FRED blocked automated fetch; consistent w/ rule, promote next pass):
-#     - FOMC Minutes H2 2026 (3wk-post-meeting rule; Fed shows "not yet scheduled")
-#     - Employment Situation Oct 2026 → Jan 2027 (first-Friday rule; Jan shifts to 2027-01-08).
-# Re-verify quarterly. Events marked "estimated" must be confirmed against official source.
+#   tier2        = NOT T1, but market-moving. These are the releases the brief
+#                  needs and the T1 gate will never list: PCE, GDP, PPI, retail
+#                  sales, jobless claims. Added 2026-07-30 after the T1 gate
+#                  reported "no events today" on a morning that had GDP + PCE +
+#                  claims all printing at 08:30.
+#
+# ---------------------------------------------------------------------------
+# WHERE THE DATES COME FROM (verified 2026-07-30)
+#
+#   FRED  — https://api.stlouisfed.org/fred/release/dates?release_id=<id>
+#           Needs FRED_API_KEY (already in this folder's .env). Returns SCHEDULED
+#           FUTURE dates. Release IDs used here:
+#             10 = CPI            50 = Employment Situation
+#             53 = GDP            54 = Personal Income & Outlays (PCE)
+#             46 = PPI             9 = Retail Sales
+#            180 = Jobless Claims
+#           🔑 FRED republishes the BLS calendar, which matters because
+#           **bls.gov returns 403 to automated fetch** (tested 2026-07-30 with and
+#           without a browser User-Agent — identical 1,323-byte refusal, so it's an
+#           IP/datacenter block, not a UA problem). FRED is how we read BLS dates.
+#           ⚠️ FRED gives DATES, not times. The 08:30 ET times below are convention.
+#
+#   Fed   — https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+#           Fetches fine. The ONLY source for FOMC decisions + minutes; FRED does
+#           not carry them.
+#
+#   NOT COVERED BY EITHER: ISM (FRED dropped it — redistribution restrictions).
+#   ISM stays a job for the playbook's step-2 web sweep. Don't guess it here.
+#
+# ---------------------------------------------------------------------------
+# Last updated: 2026-07-30 (was 2026-07-15).
+#   Promoted to verified via the sources above:
+#     - FOMC Minutes 2026-08-19            (Fed lists it explicitly)
+#     - Employment Situation 2026-10-02, 2026-11-06, 2026-12-04  (FRED id=50;
+#       these were first-Friday GUESSES and all three turned out correct)
+#     - CPI Aug–Dec independently corroborated by FRED (already verified via mirrors)
+#   STILL ESTIMATED — genuinely not published yet, not an oversight:
+#     - FOMC Minutes Sep/Oct/Dec 2026 + Feb 2027 — the Fed's own page says "not yet
+#       scheduled". The 3wk-post-meeting rule is now validated against 5 confirmed
+#       instances, so trust it, but keep the flag.
+#     - Employment Situation 2027-01-08 — beyond FRED's published horizon.
+#
+# RE-VERIFY QUARTERLY → next pass due ~2026-10-30.
+#   The quarterly job is now a diff, not a hunt: pull the FRED release IDs above,
+#   compare to these dates, promote anything the Fed has newly scheduled, and extend
+#   both tiers into the next year. Anything still marked verified:false must be
+#   confirmed against its official source before it's trusted.
 #
 # Times are in America/New_York (ET) — the loader converts to UTC for the gate.
 # FOMC rate decisions are at 14:00 ET; FOMC Minutes at 14:00 ET (Wed, 3 weeks post-meeting);
@@ -68,8 +104,8 @@ events:
   - name: "FOMC Minutes"
     date: 2026-08-19
     time_et: "14:00"
-    source: estimated_3wk_post_meeting
-    verified: false
+    source: federalreserve.gov     # promoted 2026-07-30 — Fed lists this one explicitly
+    verified: true
   - name: "FOMC Minutes"
     date: 2026-10-07
     time_et: "14:00"
@@ -112,23 +148,24 @@ events:
     time_et: "08:30"
     source: bls.gov
     verified: true
+  # Oct/Nov/Dec promoted 2026-07-30: were first-Friday guesses, all three confirmed by FRED id=50.
   - name: "Employment Situation"
     date: 2026-10-02
     time_et: "08:30"
-    source: bls_first_friday_estimated
-    verified: false
+    source: fred_release_50
+    verified: true
   - name: "Employment Situation"
     date: 2026-11-06
     time_et: "08:30"
-    source: bls_first_friday_estimated
-    verified: false
+    source: fred_release_50
+    verified: true
   - name: "Employment Situation"
     date: 2026-12-04
     time_et: "08:30"
-    source: bls_first_friday_estimated
-    verified: false
+    source: fred_release_50
+    verified: true
   - name: "Employment Situation"
-    date: 2027-01-08
+    date: 2027-01-08     # beyond FRED's published horizon as of 2026-07-30
     time_et: "08:30"
     source: bls_first_friday_estimated
     verified: false
@@ -174,3 +211,150 @@ events:
     time_et: "08:30"
     source: bls_mirror_confirmed
     verified: true
+
+# =============================================================================
+# TIER 2 — not T1, but market-moving. See the header for why this exists.
+# All dates pulled from the FRED release calendar on 2026-07-30 and verified by
+# construction; the release ID is in each section header. All 08:30 ET.
+# =============================================================================
+tier2:
+  # === PERSONAL INCOME & OUTLAYS / PCE (BEA, FRED id=54) ===
+  # Core PCE is the Fed's preferred inflation gauge — the single most important
+  # non-T1 number on this list.
+  - name: "PCE (Personal Income & Outlays)"
+    date: 2026-08-26
+    time_et: "08:30"
+  - name: "PCE (Personal Income & Outlays)"
+    date: 2026-09-30
+    time_et: "08:30"
+  - name: "PCE (Personal Income & Outlays)"
+    date: 2026-10-29
+    time_et: "08:30"
+  - name: "PCE (Personal Income & Outlays)"
+    date: 2026-11-25
+    time_et: "08:30"
+  - name: "PCE (Personal Income & Outlays)"
+    date: 2026-12-23
+    time_et: "08:30"
+
+  # === GDP (BEA, FRED id=53) — shares its dates with PCE; BEA bundles them ===
+  - name: "GDP"
+    date: 2026-08-26
+    time_et: "08:30"
+  - name: "GDP"
+    date: 2026-09-30
+    time_et: "08:30"
+  - name: "GDP"
+    date: 2026-10-29
+    time_et: "08:30"
+  - name: "GDP"
+    date: 2026-11-25
+    time_et: "08:30"
+  - name: "GDP"
+    date: 2026-12-23
+    time_et: "08:30"
+
+  # === PPI (BLS, FRED id=46) ===
+  - name: "PPI"
+    date: 2026-08-13
+    time_et: "08:30"
+  - name: "PPI"
+    date: 2026-09-10
+    time_et: "08:30"
+  - name: "PPI"
+    date: 2026-10-15
+    time_et: "08:30"
+  - name: "PPI"
+    date: 2026-11-13
+    time_et: "08:30"
+  - name: "PPI"
+    date: 2026-12-15
+    time_et: "08:30"
+
+  # === RETAIL SALES (Census, FRED id=9) ===
+  - name: "Retail Sales"
+    date: 2026-08-14
+    time_et: "08:30"
+  - name: "Retail Sales"
+    date: 2026-09-16
+    time_et: "08:30"
+  - name: "Retail Sales"
+    date: 2026-10-15
+    time_et: "08:30"
+  - name: "Retail Sales"
+    date: 2026-11-17
+    time_et: "08:30"
+  - name: "Retail Sales"
+    date: 2026-12-16
+    time_et: "08:30"
+
+  # === JOBLESS CLAIMS (DOL, FRED id=180) — weekly ===
+  # Listed explicitly rather than as "every Thursday" ON PURPOSE: holiday weeks
+  # shift. 2026-11-25 is a WEDNESDAY (Thanksgiving), and a Thursday rule would
+  # have missed it.
+  - name: "Jobless Claims"
+    date: 2026-08-06
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-08-13
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-08-20
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-08-27
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-09-03
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-09-10
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-09-17
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-09-24
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-10-01
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-10-08
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-10-15
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-10-22
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-10-29
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-11-05
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-11-12
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-11-19
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-11-25     # WEDNESDAY — Thanksgiving shift
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-12-03
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-12-10
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-12-17
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-12-24
+    time_et: "08:30"
+  - name: "Jobless Claims"
+    date: 2026-12-31
+    time_et: "08:30"
