@@ -72,7 +72,25 @@ wall and put wall are computed locally from the chain — not fetched from anyon
 
 ## 8. Event gate
 
-`t1_calendar.yaml`, 21-day horizon.
+`t1_calendar.yaml`, 21-day horizon. **Two tiers, deliberately not merged** (added 2026-07-30):
+
+| Key | What it is | Drives |
+|---|---|---|
+| `events` | MFFU's prop-firm restricted-trading list — FOMC, FOMC Minutes, Employment Situation, CPI | `today_is_t1` |
+| `tier2` | Market-moving but NOT T1 — PCE, GDP, PPI, retail sales, jobless claims | `today_tier2` |
+
+**`today_is_t1` still means only what it always meant.** Tier 2 must never be folded into it
+or the prop-firm gate silently changes meaning. Why the split exists: on 2026-07-30 the gate
+reported no events on a morning that had GDP + PCE + claims all printing at 08:30, because
+none of the three is on MFFU's list. Today's tier-2 releases now render first and in red.
+
+Dates come from the **FRED release calendar** (`fred/release/dates`, IDs in the YAML header).
+🔑 This matters because **bls.gov returns 403 to automated fetch** — tested with and without a
+browser User-Agent, identical refusal, so it's an IP block we can't UA our way around. FRED
+republishes the BLS calendar, so it's how we read BLS dates at all.
+
+**ISM is in neither tier** — FRED dropped it over redistribution restrictions. It stays a job
+for the playbook's step-2 web sweep, along with Fed speakers.
 
 ## 9. News
 

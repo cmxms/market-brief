@@ -688,21 +688,43 @@ def gex_tradier(today: dt.date) -> dict:
 
 
 def event_gate(today: dt.date, horizon_days: int = 21) -> dict:
+    """Read both calendar tiers.
+
+    The two tiers answer different questions and are deliberately NOT merged:
+      - `events` (T1) is MFFU's restricted-trading list -> drives `today_is_t1`.
+      - `tier2`  is market-moving-but-not-T1 (PCE, GDP, PPI, retail, claims).
+
+    Before tier2 existed the brief's event section was T1-only, and on 2026-07-30
+    it reported "no events today" on a morning with GDP + PCE + claims all at
+    08:30. `today_is_t1` still means ONLY what it always meant -- don't fold
+    tier2 into it, or the prop-firm gate silently changes meaning.
+    """
     if not T1_CALENDAR.exists():
         return {"error": "no t1 calendar"}
     cal = yaml.safe_load(T1_CALENDAR.read_text(encoding="utf-8"))
-    events = []
-    for e in cal.get("events", []):
-        d = e["date"] if isinstance(e["date"], dt.date) else dt.date.fromisoformat(str(e["date"]))
-        delta = (d - today).days
-        if 0 <= delta <= horizon_days:
-            events.append({"name": e["name"], "date": str(d), "time_et": e.get("time_et"),
-                           "days_away": delta, "verified": e.get("verified")})
-    events.sort(key=lambda x: x["days_away"])
+
+    def _window(key: str, default_verified) -> list:
+        rows = []
+        for e in cal.get(key, []) or []:
+            d = e["date"] if isinstance(e["date"], dt.date) else dt.date.fromisoformat(str(e["date"]))
+            delta = (d - today).days
+            if 0 <= delta <= horizon_days:
+                rows.append({"name": e["name"], "date": str(d), "time_et": e.get("time_et"),
+                             "days_away": delta,
+                             "verified": e.get("verified", default_verified)})
+        rows.sort(key=lambda x: x["days_away"])
+        return rows
+
+    events = _window("events", None)
+    # tier2 is FRED-sourced and verified by construction, so it has no per-entry flag.
+    tier2 = _window("tier2", True)
+
     return {
         "today_is_t1": any(e["days_away"] == 0 for e in events),
         "today_events": [e for e in events if e["days_away"] == 0],
         "upcoming": events,
+        "today_tier2": [e for e in tier2 if e["days_away"] == 0],
+        "upcoming_tier2": tier2,
     }
 
 
@@ -778,10 +800,31 @@ def render_md(d: dict) -> str:
 
     eg = d["event_gate"]
     L.append("## Event gate")
-    L.append(f"- today_is_t1: **{eg.get('today_is_t1')}**")
-    for e in eg.get("upcoming", [])[:6]:
-        L.append(f"  - +{e['days_away']}d  {e['date']}  {e['name']} {e.get('time_et') or ''}"
-                 f"{'' if e.get('verified') else '  (unverified)'}")
+    L.append(f"- today_is_t1: **{eg.get('today_is_t1')}**   "
+             f"(MFFU restricted-trading list ONLY — not 'nothing happens today')")
+
+    # Today's tier-2 releases go FIRST and loud. This is the line whose absence
+    # nearly cost the 2026-07-30 brief its two biggest numbers.
+    t2_today = eg.get("today_tier2") or []
+    if t2_today:
+        L.append("- 🔴 **TODAY (tier 2 — market-moving, not T1):**")
+        for e in t2_today:
+            L.append(f"    - {e.get('time_et') or ''} ET  **{e['name']}**")
+
+    up = eg.get("upcoming", [])
+    if up:
+        L.append("- T1 ahead:")
+        for e in up[:6]:
+            L.append(f"  - +{e['days_away']}d  {e['date']}  {e['name']} {e.get('time_et') or ''}"
+                     f"{'' if e.get('verified') else '  (unverified)'}")
+
+    up2 = [e for e in eg.get("upcoming_tier2", []) if e["days_away"] > 0]
+    if up2:
+        L.append("- Tier 2 ahead:")
+        for e in up2[:8]:
+            L.append(f"  - +{e['days_away']}d  {e['date']}  {e['name']} {e.get('time_et') or ''}")
+    L.append("- (ISM is in NEITHER tier — FRED doesn't carry it. Catch it in the step-2 web sweep,"
+             " along with Fed speakers.)")
 
     L.append("\n## Index recap (daily close-to-close)")
     ir = d["index_recap"]
