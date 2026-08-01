@@ -1,55 +1,48 @@
-# Market Brief + Dashboard — Backlog
+# Market Brief — Backlog
 
 Next-session to-do. Newest intent at top; check off / retire with a trail.
 
-## Dashboard remodel (light 3-col board, built 2026-07-17)
+Scope note (2026-08-01): this repo does two things — **gather the numbers and write the
+brief**, then **post it to Discord**. The Brief Live dashboard was split out to
+`CMTMS/brief-live/`; its backlog went with it. Don't add board work here.
 
-The layout spike landed and the user likes it (old dark board was "dreary"). The
-3-column light board is live in `dashboard/static/`; old board backed up in
-`dashboard/_backup_darkboard/`. Follow-ups, in priority order:
+## Event calendar
 
-- [ ] **Fear & Greed fetcher.** Center panel has a stub. Wire a real source for the
-      CNN Fear & Greed index (or an equivalent breadth/sentiment gauge). Add as a
-      slow-cadence poller in `dashboard/server.py` (it moves once a day). Candidate:
-      CNN's undocumented JSON endpoint (`production.dataviz.cnn.io/index/fearandgreed/...`)
-      — verify it's still live and stable before depending on it.
-
-- [ ] **Non-T1 economic calendar — SHARED gap (brief + dashboard).** Both the brief
-      and the dashboard's Economic Calendar panel only show T1 (FOMC/CPI/jobs). The
-      "important" non-T1 prints (PPI, retail sales, PCE, jobless claims, ISM) and
-      scheduled Fed speakers slip through. Today (7/17) that gap hid the 10:00 UMich
-      print, which mattered. **Need a reliable programmatic source** so it's caught by
-      DATA, not a manual web sweep each morning. Evaluate: Trading Economics calendar,
-      Econoday, FMP economic-calendar API, or the Fed/BLS release schedules directly.
-      Once sourced, feed BOTH the brief's Step-2 sweep and the dashboard panel from it.
-      Cross-ref: `playbook.md` Step 2 currently patches this with a manual dated search.
-
-- [ ] **dataviz pass on the light board.** The new light theme reused the dark board's
-      direction colors darkened by eye — NOT validated. Run the `dataviz` skill's
-      method: validate green-up/red-down for CVD legibility on the light surface, check
-      WCAG contrast, lock a proper palette. Only worth doing once the layout is settled.
-      (The old dark board WAS validated — see the retired comments in `_backup_darkboard/style.css`.)
-
-- [ ] **Portfolio + Recent Trades panels** (right column) are stubs. Needs a source
-      decision first: flow-trader paper book (`chads-shit/flow-trader/data/`) vs a live
-      broker. Then wire balance / day P&L / 30d perf + recent fills + open positions.
-
-- [ ] **AI-analysis panel is fed by the MORNING brief, not live analysis.** (Surfaced
-      2026-07-19.) `read_brief()` parses the newest `briefs/{date}.md` for title + stamp
-      + TL;DR. Consequence: **running `gather.py` does NOT update that panel** — it only
-      writes `data/{date}.json` + `.data.md`; the brief markdown has to be written
-      (in-session) for the panel to change. The server docstring already concedes the
-      panel "ultimately wants" continuously-updated intraday analysis rather than a
-      once-a-day brief. Decide: either (a) relabel the panel honestly as "This morning's
-      brief" with its own date, or (b) build a real intraday analysis generator. Until
-      then the panel can silently show a stale read — on 7/19 it displayed Friday's brief
-      until a Sunday one was written.
+- [x] **Non-T1 economic calendar — BRIEF HALF DONE 2026-07-30.** ~~The brief only shows
+      T1 (FOMC/CPI/jobs).~~ **Source found: the FRED release calendar**
+      (`api.stlouisfed.org/fred/release/dates?release_id=<id>`, key already in `.env`).
+      Release IDs: **10** CPI · **50** Employment Situation · **53** GDP · **54** PCE ·
+      **46** PPI · **9** Retail Sales · **180** Jobless Claims.
+      Returns scheduled FUTURE dates. Beat the alternatives on the list because it needs no
+      new key, no scraping, and 🔑 **it republishes the BLS calendar — bls.gov itself 403s
+      automated fetch** (tested both with and without a browser UA; it's an IP block).
+      Added as a `tier2:` block in `t1_calendar.yaml` + `today_tier2` in `event_gate()`.
+      Triggered by 7/30, when the T1 gate said "no events" on a GDP + PCE + claims morning.
+      - [ ] **ISM + Fed speakers + second-tier prints — STILL A MANUAL SWEEP.** No
+            programmatic source adopted. What was ruled out on 2026-07-30:
+            - **scanline — NO economic calendar.** Its 27 tools wrap TradingView's stock
+              *screener*; `earnings_radar` is company earnings only. Dead end, don't re-check.
+            - **ismworld.org — SSO-walled.** The release-date calendar 302s to a login. Its
+              "Manufacturing = 1st business day / Services = 3rd, 10:00 ET" rule has real
+              holiday exceptions (Jan 5 2026; July Services moved for the Jul 3 observance),
+              so **never hand-write ISM dates into the YAML**.
+            - **traderdaddy-pro `get_economic_calendar` — evaluated, works, NOT ADOPTED**
+              (user's call, 2026-07-30). For the record if it's ever reconsidered: it's
+              ForexFactory-backed and does carry ISM + speakers + UoM + CB confidence with
+              impact levels, but it's **current-week only** (an explicit August range AND
+              `week='next'` both returned 0) and **`actual` is always null** even for prints
+              that already landed, with forecasts that drift (had Advance GDP 2.1% vs a 1.5%
+              print). It could never have replaced FRED, only supplemented it.
+            So Step 2's dated web search stays the mechanism. It has worked — it's what
+            caught GDP + PCE + claims on 7/30 — but it depends on the sweep being run.
+      - [ ] **Quarterly re-verify is now a diff, not a hunt** — next pass due **~2026-10-30**
+            (noted in the YAML header). Pull the 7 release IDs, diff against the file, promote
+            whatever the Fed has newly scheduled, extend both tiers into 2027. Consider the
+            deferred `--verify-calendar` flag on `gather.py` to automate the diff — hold until
+            tier 2 has earned its place over a few briefs.
 
 ## Notes
-- Dashboard server must be RESTARTED (not just refreshed) to pick up `server.py`
-  changes; static file edits serve fresh on refresh.
-- The `brief` poller caches for **300s**, so a newly written brief takes up to ~5 minutes
-  to appear on the board (verified 7/19). Market/GEX/rotation panels are live pollers
-  calling `gather` functions directly and refresh on their own cadence.
 - `gather.py` never posts anywhere — Discord is a separate script (`post_discord.py`).
   Running gather is always safe.
+- `CMTMS/brief-live/` imports this repo's `gather.py` live (not a copy) and borrows this
+  repo's `.venv`. A breaking change to `gather.py`'s function signatures breaks that board.
