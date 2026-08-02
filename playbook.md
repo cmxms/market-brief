@@ -62,8 +62,15 @@ calls: it informs the reader's own regime call.
 - **Flag stale data.** The data block prints each yield's MODE (LIVE/EOD) + SOURCE +
   as-of + a ⚠️ STALE flag. Quote the LIVE number when present; if it shows EOD/STALE,
   say so — never present a stale yield as live.
-- **VIX term structure (contango vs backwardation) is computed from the LIVE values** —
-  quote it from the data block, don't recompute.
+- **VIX term structure — quote `spread_9d_minus_30d` and `state` from the block, and
+  never subtract the two VIX numbers yourself.** VIX publishes through the pre-open but
+  **VIX9D only recomputes in RTH**, so pre-open the two legs are usually from *different
+  sessions* (17 of 20 July runs). The block now detects that and reports the spread at
+  the last close both legs shared — a real same-moment reading — and prints the raw
+  live-minus-stale figure only to tell you not to use it. If you see `⚠️ legs are from
+  DIFFERENT sessions`, say the term structure is **as of that prior close** and quote
+  today's VIX move separately. *(This is not hypothetical: on 2026-07-30 the naive
+  subtraction read BACKWARDATION / "acute near-term fear"; aligned, it was CONTANGO.)*
 - **Source cross-check (REQUIRED gate):** the block has a "Source cross-check (CNBC vs
   Yahoo)" section. ✓ all match = confirmed. ⚠️ MISMATCH = **do NOT publish that number**
   until you've verified which source is right. "Only one source" = degraded but usable.
@@ -82,6 +89,18 @@ calls: it informs the reader's own regime call.
 - **Don't over-precision a pre-market number.** GEX/flip/walls come from *prior-session*
   greeks and move at the open. Round them (`~750.7`, not `750.78`). Cent-level precision
   on a stale-greek number is false confidence.
+- **`🔴 EVENT CALENDAR UNAVAILABLE` = the gate is BLIND, not quiet.** The calendar file
+  failed to parse, so the block has NO event information — which is not the same as
+  there being no events. **Never write "no events today" off a blind gate.** Build the
+  🚨 Event gate section entirely from the step-2 web sweep, and tell the user in the CLI
+  so the file gets fixed. `⚠️ N calendar entries skipped as malformed` is the milder
+  version: the calendar below it is usable, just treat it as possibly missing one event.
+- **`🔴 CHAIN INCOMPLETE` in the GEX section = do NOT write a regime call.** It means part
+  of the option chain came back without greeks or open interest, so GEX is understated —
+  and an understated GEX *looks exactly like* a shift to negative gamma. Write the 🧭 Regime
+  read from vol and price action instead, say the gamma read is unavailable today in one
+  short clause, and **tell the user in the CLI, not in the brief** (this is a process note).
+  It stays silent on a healthy chain, so if you see it, it's real.
 
 ## Canonical headers — COPY VERBATIM (do not improvise emoji or wording)
 
@@ -93,7 +112,15 @@ under each changes day to day.
 
 **Freshness stamp (REQUIRED, right under the title):** an italic line with the ET
 data-pull time from the gather block's `as_of_et` (e.g. `*Data pulled Wed Jul 8, 2026 8:42 AM ET*`).
-Use the gatherer's stamp verbatim.
+Use the gatherer's stamp verbatim — exact wording `*Data pulled {as_of_et}*`, no variants.
+
+🔑 **The stamp is the brief's only link back to the numbers it was built from, so it must
+match the block you actually wrote from.** If you re-run `gather.py`, you are now writing
+from a NEW block: re-read it and update the stamp, or don't re-run. The gatherer archives
+the superseded block to `data/runs/{date}-{HHMM}.json` and prints a NOTE when it does —
+that HHMM is the same one the stamp shows, so a stamped brief always resolves to exactly
+one data file. *(On 7/16, 7/27 and 7/30 the stamp and the stored block disagreed by 4, 91
+and 41 minutes; 7/27's published NQ change was 1.39pp off the stored numbers as a result.)*
 
 **Then a short `**TL;DR:**` bold lead line** (community readers skim).
 
