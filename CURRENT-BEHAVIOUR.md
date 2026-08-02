@@ -54,9 +54,33 @@ caught before it reaches the brief. Output per key: `primary`, `fallback`, `diff
 `_cnbc_vol()` → `_yahoo_vol()`. `^VIX` (30-day) and `^VIX9D` (9-day) — both needed, because the
 *relationship between them* is the term-structure read.
 
+⚠️ **The two legs are usually NOT from the same moment** (updated 2026-08-02). VIX publishes
+through the pre-open; **VIX9D only recomputes in RTH**, so pre-open its `last` is the prior
+session's close — true on **17 of 20** July runs. Subtracting them raw compares two different
+days and it flips signs, not just magnitudes: on 2026-07-30 the raw spread read
+**BACKWARDATION / "acute near-term fear"** (+1.47); aligned at the 7/29 close it is
+**CONTANGO** (−0.28).
+
+`_vol_term_structure()` therefore reports the spread **at the last close both legs shared** —
+VIX's close for that session is recovered as `last - chg`, and VIX9D's `last` already *is* that
+close — and carries the live VIX move separately. Fields: `spread_9d_minus_30d` (always the
+safe-to-quote number), `state`, `as_of`, `aligned`, `mixed_dates`, plus
+`spread_raw_unaligned` kept **only** so the block can say don't quote it. When both legs share
+a date the behaviour is unchanged (verified byte-identical on the 3 such days).
+
 ## 5. Index futures and oil
 
 yfinance: `ES=F`, `YM=F`, `NQ=F`, `RTY=F`, and `CL=F` (WTI crude).
+
+`pull_intraday_nq()` also returns the overnight gap. Two things it must keep doing (fixed
+2026-08-02): pull **`period="5d"`**, because a 2-calendar-day window collapses to a single
+session over a weekend and then there is no prior close at all; and find the prior close by
+**walking back** to the most recent earlier date that has bars at/before the 16:00 ET settle,
+never `dates[-2]`. yfinance labels futures bars by calendar date (00:09–23:58 ET), so a Sunday
+holds only the 18:00 evening open — `dates[-2]` on a Monday IS Sunday, a `<=16:00` filter there
+matches nothing, and the gap came back `None` on **every Monday** in the archive (3 of 3, vs
+14 of 14 other weekdays fine). Walking back lands on Friday's settle and skips holidays too.
+`prior_close_date` now says which session the gap is measured against.
 
 ## 6. Sector rotation
 
@@ -69,6 +93,26 @@ separates rotation from the market simply moving. Plus `SMH` (semis), `IGV` (sof
 Tradier option chains for `SPY` and `QQQ`. Two reads: the **nearest 4 expirations** for the
 intraday regime, and the **full chain** for the structural flip level. Zero-gamma level, call
 wall and put wall are computed locally from the chain — not fetched from anyone.
+
+**Incomplete-chain guard** (added 2026-08-02). A contract with no gamma or no open interest
+can't be used and is skipped. That's normally harmless, but if Tradier's greeks degrade, GEX is
+computed from a partial chain, comes out **understated**, and every field still looks
+plausible — and a shrinking GEX is exactly what a genuine regime flip looks like. Demonstrated
+on a synthetic chain: dropping 30% of contracts took GEX from **+7.19bn "positive"** to
+**−6.52bn "negative"** while regime, flip, walls and `n_contracts` all still read normally.
+
+So every run records `n_dropped`, `dropped_pct` and `dropped_oi_pct` in the JSON — **always,
+healthy or not**, so the threshold can later be retuned from real data rather than one sample.
+`data_warning` is set only past `GEX_DROP_WARN_PCT` (2.0), and the rendered block prints a
+`🔴 CHAIN INCOMPLETE` line only when it's set. **Silent on a healthy chain** — measured
+2026-08-02: 0 dropped of 13,898 SPY and 12,386 QQQ contracts, a clean 0.0% baseline.
+
+`dropped_oi_pct` is the better of the two alarms: open interest is the multiplier in the GEX
+formula, so it tracks how much GEX actually went missing, whereas a raw count treats a dead
+deep-OTM strike the same as an at-the-money one. It is deliberately the more sensitive trigger.
+
+⚠️ **This is a note to the brief WRITER, never brief copy** — see playbook.md's "never publish
+process notes."
 
 ## 8. Event gate
 
@@ -92,6 +136,28 @@ republishes the BLS calendar, so it's how we read BLS dates at all.
 **ISM is in neither tier** — FRED dropped it over redistribution restrictions. It stays a job
 for the playbook's step-2 web sweep, along with Fed speakers.
 
+**Fails soft, in two layers** (added 2026-08-02). This was the ONLY section that could take the
+whole run down: `gather()` raised before writing anything, so one typo in the YAML cost the
+entire morning — no data block, no brief, and the futures/GEX/news calls never even ran.
+Measured on copies, **5 of 7 realistic typos did exactly that** (13th month, day 32, an unpadded
+date, a one-space indent slip, a stray tab).
+
+1. **Per-entry guard** — a bad row is skipped and listed in `malformed`; the rest of the
+   calendar still works. An unpadded date now costs you that one event, not the calendar.
+2. **Outer net** — if the file is unparseable as a whole (indent slip, tab, garbage),
+   `event_gate` returns `{"error": ...}` like every other section and the brief still gets
+   written without it.
+
+🔑 **`name` is now read for EVERY entry, not just in-window ones.** It used to be read only
+inside the 21-day horizon test, which made a missing `name:` a **time bomb** — harmless on the
+day you edit and verify the file, then fatal every morning from the day the event drifted inside
+21 days. Measured on a 2026-08-26 entry: fine on 08-04, dead from 08-05. Now reported on the
+first run.
+
+⚠️ **A blind gate must never read as a quiet calendar.** When the gate errors, the block says so
+in red and explicitly tells the writer *not* to infer "no events today" — the 2026-07-30 mistake
+in its worst form. Verified: `today_is_t1` is absent rather than `False`.
+
 ## 9. News
 
 Finnhub. Filtered to a trusted-source list (Reuters, Bloomberg, CNBC, WSJ, FT, AP, …) and
@@ -101,11 +167,19 @@ tagged against a theme keyword list, because a pure macro search misses sector c
 
 ## Outputs — the other half of the contract
 
-1. `data/{date}.json` — every number, machine-readable
+1. `data/{date}.json` — every number, machine-readable. **Always "the latest run"** — the path
+   never changes, so `playbook.md` and `brief-live` keep working.
 2. `data/{date}.data.md` — the same thing as a human-readable block
-3. `briefs/{date}.md` — the narrative, written by an LLM from the above per `playbook.md`,
+3. `data/runs/{date}-{HHMM}.json` + `.data.md` — a **superseded** run, moved here automatically
+   before a re-run overwrites it (added 2026-08-02). `HHMM` is the same time the brief's
+   freshness stamp carries, so a stamped brief resolves to exactly one block.
+   **Why this exists:** the whole point of `gather.py` is that the brief is never built on the
+   model's memory — the stored block is the proof. A second run used to overwrite it silently,
+   which happened on **3 of 19** July days (7/16, 7/27, 7/30) and left the published numbers
+   unreconcilable with the only surviving data; `data/` is gitignored, so the original was gone.
+4. `briefs/{date}.md` — the narrative, written by an LLM from the above per `playbook.md`,
    including a web-search pass for the *why*
-4. `post_discord.py` fans it out
+5. `post_discord.py` fans it out
 
 The expensive LLM synthesis happens **once per day, here.** Anything downstream consumes the
 result rather than redoing it.

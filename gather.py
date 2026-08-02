@@ -97,6 +97,13 @@ OIL = ("CL=F", "WTI crude")
 # GEX: dealer gamma for the two most-hedged index proxies.
 GEX_SYMBOLS = ("SPY", "QQQ")
 GEX_NEAR_EXPIRATIONS = 4   # nearest N expirations for the intraday regime read (matches the recorded baseline)
+# A contract with no gamma or no open interest can't be used and gets skipped. That is
+# normally fine — but if Tradier's greeks degrade, GEX shrinks toward zero and every field
+# still looks plausible, which is what a real regime flip looks like. So: count the skips
+# and speak up past this share. Measured 2026-08-02: 0 dropped of 13,898 SPY / 12,386 QQQ,
+# i.e. the healthy baseline is a clean 0.0%. 2% is well clear of that and still early.
+# The raw counts go in the JSON every run so this can be retuned from real data later.
+GEX_DROP_WARN_PCT = 2.0
 
 # Treasury yields: source from the US Treasury's own Daily Par Yield Curve (the
 # authoritative source — these ARE the constant-maturity rates FRED republishes a
@@ -173,9 +180,14 @@ def pull_daily(ticker: str) -> dict:
 
 def pull_intraday_nq() -> dict:
     """Overnight/this-morning read for NQ: latest price, gap vs prior close,
-    and overnight range. Best-effort; flags staleness if the market is shut."""
+    and overnight range. Best-effort; flags staleness if the market is shut.
+
+    period="5d", not "2d": a 2-CALENDAR-day window collapses to a single session
+    across a weekend (measured live on a Sunday — one date returned, not two), and
+    one session means there is no prior close to gap against.
+    """
     try:
-        h = yf.download("NQ=F", period="2d", interval="1m", progress=False, auto_adjust=False)
+        h = yf.download("NQ=F", period="5d", interval="1m", progress=False, auto_adjust=False)
         if h.empty:
             return {"error": "no data"}
         idx = h.index
@@ -189,10 +201,20 @@ def pull_intraday_nq() -> dict:
         last_ts = c.index[-1]
         last_px = float(c.iloc[-1])
         dates = sorted(set(c.index.date))
-        prior_close = None
-        if len(dates) >= 2:
-            prior = c[(c.index.date == dates[-2]) & (c.index.time <= dt.time(16, 0))]
-            prior_close = float(prior.iloc[-1]) if len(prior) else None
+        # Walk BACK to the most recent EARLIER date that actually has bars at/before
+        # the 16:00 ET settle — do not assume dates[-2].
+        # yfinance labels futures bars by calendar date and a date runs 00:09–23:58 ET,
+        # so a SUNDAY contains only the 18:00 evening open. On a Monday dates[-2] IS
+        # Sunday, a `time <= 16:00` filter there matches zero bars, and the gap came
+        # back None on every Monday in the archive (3 of 3, while 14 of 14 other
+        # weekdays had a number). Walking back lands on Friday's settle instead —
+        # which is what a Monday gap means — and skips holidays for free.
+        prior_close, prior_date = None, None
+        for _d in reversed(dates[:-1]):
+            prior = c[(c.index.date == _d) & (c.index.time <= dt.time(16, 0))]
+            if len(prior):
+                prior_close, prior_date = float(prior.iloc[-1]), _d
+                break
         on = h[h.index.date == dates[-1]]
         on_hi = float(on["High"].max().iloc[0]) if hasattr(on["High"].max(), "iloc") else float(on["High"].max())
         on_lo = float(on["Low"].min().iloc[0]) if hasattr(on["Low"].min(), "iloc") else float(on["Low"].min())
@@ -200,6 +222,7 @@ def pull_intraday_nq() -> dict:
             "last_px": round(last_px, 2),
             "last_ts_et": last_ts.isoformat(),
             "prior_rth_close": round(prior_close, 2) if prior_close else None,
+            "prior_close_date": str(prior_date) if prior_date else None,
             "gap": round(last_px - prior_close, 2) if prior_close else None,
             "overnight_range": [round(on_lo, 2), round(on_hi, 2)],
         }
@@ -484,6 +507,66 @@ def source_crosscheck() -> dict:
     }
 
 
+def _vol_term_structure(vix: dict, vix9d: dict) -> dict | None:
+    """VIX9D vs VIX — but only ever as a SAME-MOMENT comparison.
+
+    VIX publishes through the pre-open; VIX9D only recomputes in RTH. Measured over
+    20 July data blocks, VIX9D's last_date was the PRIOR session on 17 of them — so
+    the naive live-minus-stale subtraction compares two different days and then
+    labels the result with confidence.
+
+    That is not a rounding problem, it flips signs. On 2026-07-30 it produced the
+    archive's ONLY backwardation reading — "acute near-term fear" — from VIX 18.91
+    (7/30) minus VIX9D 20.38 (7/29). Aligned at the 7/29 close, VIX was 20.66 and
+    the spread is -0.28: contango.
+
+    So: when both legs share a date, report the live spread. When they don't, report
+    the spread at the last session BOTH legs closed on — VIX's close for that session
+    is recoverable as `last - chg`, and VIX9D's `last` already IS that close — and
+    carry the live VIX move separately. `spread_9d_minus_30d` is always the number
+    that is safe to quote; the unaligned figure is kept only for transparency.
+    """
+    v, v9 = vix.get("last"), vix9d.get("last")
+    if v is None or v9 is None:
+        return None
+
+    def _state(spread: float) -> str:
+        return ("BACKWARDATION (9d > 30d — acute near-term fear)" if spread > 0
+                else "CONTANGO (9d < 30d — normal/calm near-term)")
+
+    vd, v9d = vix.get("last_date"), vix9d.get("last_date")
+    ts = {"vix": v, "vix9d": v9, "vix_date": vd, "vix9d_date": v9d,
+          "mixed_dates": bool(vd and v9d and vd != v9d)}
+
+    if not ts["mixed_dates"]:
+        ts |= {"as_of": vd, "aligned": True, "spread_9d_minus_30d": round(v9 - v, 2),
+               "state": _state(v9 - v)}
+        return ts
+
+    chg = vix.get("chg")
+    if chg is None:
+        # Can't recover VIX's prior close, so there is no honest comparison to make.
+        ts |= {"as_of": None, "aligned": False, "spread_9d_minus_30d": None, "state": None,
+               "note": (f"VIX is {vd} and VIX9D is {v9d} — different sessions, and VIX's "
+                        f"change-on-day is missing so the two cannot be aligned. "
+                        f"DO NOT quote a term structure from this block.")}
+        return ts
+
+    v_close = round(v - chg, 2)
+    spread = round(v9 - v_close, 2)
+    ts |= {"as_of": v9d, "aligned": True,
+           "vix_at_that_close": v_close,
+           "spread_9d_minus_30d": spread,
+           "state": _state(spread),
+           "vix_live": v, "vix_live_chg": chg,
+           "spread_raw_unaligned": round(v9 - v, 2),
+           "note": (f"VIX9D last recomputed {v9d}; VIX is live {vd}. Spread is taken at "
+                    f"the {v9d} close (VIX {v_close} vs VIX9D {v9}) — a real same-moment "
+                    f"reading. VIX has since moved to {v} ({chg:+}). The unaligned "
+                    f"live-minus-stale figure would read {round(v9 - v, 2):+} — not quotable.")}
+    return ts
+
+
 def macro_pulse(today: dt.date | None = None) -> dict:
     today = today or dt.datetime.now().date()
     live = live_yields(today)
@@ -497,15 +580,9 @@ def macro_pulse(today: dt.date | None = None) -> dict:
             d["label"] = lbl
             d["source"] = "yfinance(daily)"
         out[t] = d
-    try:
-        v, v9 = out["^VIX"]["last"], out["^VIX9D"]["last"]
-        out["term_structure"] = {
-            "vix": v, "vix9d": v9, "spread_9d_minus_30d": round(v9 - v, 2),
-            "state": ("BACKWARDATION (9d > 30d — acute near-term fear)" if v9 > v
-                      else "CONTANGO (9d < 30d — normal/calm near-term)"),
-        }
-    except Exception:
-        pass
+    ts = _vol_term_structure(out.get("^VIX") or {}, out.get("^VIX9D") or {})
+    if ts:
+        out["term_structure"] = ts
     return out
 
 
@@ -625,14 +702,28 @@ def _zero_gamma_level(strike_totals: dict, significance_threshold_pct: float = 0
 
 
 def _gex_from_options(options, spot: float) -> dict:
-    """Aggregate net dealer GEX by strike over a flat list of option rows."""
+    """Aggregate net dealer GEX by strike over a flat list of option rows.
+
+    Contracts missing gamma or open interest are unusable and get skipped. We COUNT the
+    skips rather than dropping them in silence: a degraded greeks feed shrinks GEX toward
+    zero while every field stays plausible, and a shrinking GEX is exactly what a genuine
+    regime flip looks like. `dropped_oi_pct` is the better alarm of the two — open interest
+    is the multiplier in the formula, so it approximates how much GEX actually went missing,
+    whereas a count treats a dead deep-OTM strike the same as an at-the-money one.
+    """
     by_strike: dict[float, float] = {}
     call_total = put_total = 0.0
-    n = 0
+    n = n_dropped = 0
+    used_oi = dropped_oi = 0.0
     for o in options:
         g = (o.get("greeks") or {}).get("gamma")
         oi, strike, otype = o.get("open_interest"), o.get("strike"), o.get("option_type")
         if g is None or oi is None or strike is None or otype not in ("call", "put"):
+            n_dropped += 1
+            try:
+                dropped_oi += float(oi or 0)
+            except (TypeError, ValueError):
+                pass
             continue
         gex = float(g) * float(oi) * 100.0 * (spot ** 2) * 0.01
         by_strike[strike] = by_strike.get(strike, 0.0) + (gex if otype == "call" else -gex)
@@ -640,7 +731,18 @@ def _gex_from_options(options, spot: float) -> dict:
             call_total += gex
         else:
             put_total += gex
+        used_oi += float(oi)
         n += 1
+    seen = n + n_dropped
+    drop_pct = round(100.0 * n_dropped / seen, 2) if seen else None
+    oi_seen = used_oi + dropped_oi
+    drop_oi_pct = round(100.0 * dropped_oi / oi_seen, 2) if oi_seen else None
+    warn = None
+    if max(drop_pct or 0.0, drop_oi_pct or 0.0) >= GEX_DROP_WARN_PCT:
+        warn = (f"{n_dropped} of {seen} contracts ({drop_pct}%) had no gamma/open-interest "
+                f"and were excluded — {drop_oi_pct}% of open interest. GEX is computed from "
+                f"an incomplete chain and is UNDERSTATED; treat the regime/flip/walls as "
+                f"unreliable rather than as a change in positioning.")
     total = sum(by_strike.values())
     flip = _zero_gamma_level(by_strike)
     top = sorted(by_strike.items(), key=lambda kv: abs(kv[1]), reverse=True)[:5]
@@ -654,6 +756,12 @@ def _gex_from_options(options, spot: float) -> dict:
         "put_wall": min(by_strike, key=by_strike.get) if by_strike else None,
         "top_walls": [round(float(k), 1) for k, _ in top],
         "n_contracts": n,
+        # Recorded every run, healthy or not, so the warn threshold can be retuned from
+        # real data instead of one sample. Only `data_warning` is ever surfaced.
+        "n_dropped": n_dropped,
+        "dropped_pct": drop_pct,
+        "dropped_oi_pct": drop_oi_pct,
+        "data_warning": warn,
     }
 
 
@@ -701,15 +809,48 @@ def event_gate(today: dt.date, horizon_days: int = 21) -> dict:
     """
     if not T1_CALENDAR.exists():
         return {"error": "no t1 calendar"}
-    cal = yaml.safe_load(T1_CALENDAR.read_text(encoding="utf-8"))
+    try:
+        return _event_gate(today, horizon_days)
+    except Exception as e:
+        # Outer net. This section is the only one that could ever take the WHOLE run
+        # down: gather() raises before writing anything, so a single typo in the YAML
+        # cost the entire morning — no data block, no brief, and the futures/GEX/news
+        # calls never even ran. Measured: 5 of 7 realistic typos did exactly that
+        # (13th month, day 32, unpadded date, a one-space indent slip, a stray tab).
+        # Every other section fails soft and returns {"error": ...}; now so does this one.
+        return {"error": f"event calendar unreadable: {e!r}"}
+
+
+def _event_gate(today: dt.date, horizon_days: int) -> dict:
+    cal = yaml.safe_load(T1_CALENDAR.read_text(encoding="utf-8")) or {}
+    malformed: list[str] = []
 
     def _window(key: str, default_verified) -> list:
         rows = []
-        for e in cal.get(key, []) or []:
-            d = e["date"] if isinstance(e["date"], dt.date) else dt.date.fromisoformat(str(e["date"]))
+        for i, e in enumerate(cal.get(key, []) or []):
+            # Per-entry guard: one bad row costs that ONE event, not the calendar.
+            try:
+                if not isinstance(e, dict):
+                    raise TypeError(f"expected a mapping, got {type(e).__name__}")
+                raw = e["date"]
+                if isinstance(raw, dt.datetime):        # check BEFORE date — datetime subclasses it
+                    d = raw.date()
+                elif isinstance(raw, dt.date):
+                    d = raw
+                else:
+                    d = dt.date.fromisoformat(str(raw).strip())
+                # Read `name` for EVERY entry, not just in-window ones. It used to be read
+                # only inside the horizon test, which made a missing `name:` a time bomb:
+                # harmless when you edit and verify the file, fatal every morning from the
+                # day the event drifts inside 21 days. Measured on a 2026-08-26 entry —
+                # fine on 08-04, dead from 08-05.
+                name = e["name"]
+            except Exception as ex:
+                malformed.append(f"{key}[{i}]: {ex!r}")
+                continue
             delta = (d - today).days
             if 0 <= delta <= horizon_days:
-                rows.append({"name": e["name"], "date": str(d), "time_et": e.get("time_et"),
+                rows.append({"name": name, "date": str(d), "time_et": e.get("time_et"),
                              "days_away": delta,
                              "verified": e.get("verified", default_verified)})
         rows.sort(key=lambda x: x["days_away"])
@@ -719,13 +860,16 @@ def event_gate(today: dt.date, horizon_days: int = 21) -> dict:
     # tier2 is FRED-sourced and verified by construction, so it has no per-entry flag.
     tier2 = _window("tier2", True)
 
-    return {
+    out = {
         "today_is_t1": any(e["days_away"] == 0 for e in events),
         "today_events": [e for e in events if e["days_away"] == 0],
         "upcoming": events,
         "today_tier2": [e for e in tier2 if e["days_away"] == 0],
         "upcoming_tier2": tier2,
     }
+    if malformed:
+        out["malformed"] = malformed
+    return out
 
 
 def finnhub_news(key: str) -> dict:
@@ -800,31 +944,47 @@ def render_md(d: dict) -> str:
 
     eg = d["event_gate"]
     L.append("## Event gate")
-    L.append(f"- today_is_t1: **{eg.get('today_is_t1')}**   "
-             f"(MFFU restricted-trading list ONLY — not 'nothing happens today')")
+    if eg.get("error"):
+        # A blind gate must never be read as a quiet calendar — that is the 2026-07-30
+        # mistake in its worst form. The rest of the block is still good; this section
+        # is simply absent and has to be replaced by the step-2 web sweep.
+        L.append(f"- 🔴 EVENT CALENDAR UNAVAILABLE — {eg['error']}")
+        L.append("  **The gate is BLIND today. Do NOT write 'no events today' or infer a "
+                 "quiet calendar from this.** Cover the whole calendar from the step-2 web "
+                 "sweep instead, and fix t1_calendar.yaml after the brief goes out.")
+    else:
+        if eg.get("malformed"):
+            L.append(f"- ⚠️ {len(eg['malformed'])} calendar entr"
+                     f"{'y was' if len(eg['malformed']) == 1 else 'ies were'} skipped as "
+                     f"malformed — the rest of the calendar below is fine, but treat it as "
+                     f"possibly missing an event and fix the file:")
+            for m in eg["malformed"][:6]:
+                L.append(f"    - {m}")
+        L.append(f"- today_is_t1: **{eg.get('today_is_t1')}**   "
+                 f"(MFFU restricted-trading list ONLY — not 'nothing happens today')")
 
-    # Today's tier-2 releases go FIRST and loud. This is the line whose absence
-    # nearly cost the 2026-07-30 brief its two biggest numbers.
-    t2_today = eg.get("today_tier2") or []
-    if t2_today:
-        L.append("- 🔴 **TODAY (tier 2 — market-moving, not T1):**")
-        for e in t2_today:
-            L.append(f"    - {e.get('time_et') or ''} ET  **{e['name']}**")
+        # Today's tier-2 releases go FIRST and loud. This is the line whose absence
+        # nearly cost the 2026-07-30 brief its two biggest numbers.
+        t2_today = eg.get("today_tier2") or []
+        if t2_today:
+            L.append("- 🔴 **TODAY (tier 2 — market-moving, not T1):**")
+            for e in t2_today:
+                L.append(f"    - {e.get('time_et') or ''} ET  **{e['name']}**")
 
-    up = eg.get("upcoming", [])
-    if up:
-        L.append("- T1 ahead:")
-        for e in up[:6]:
-            L.append(f"  - +{e['days_away']}d  {e['date']}  {e['name']} {e.get('time_et') or ''}"
-                     f"{'' if e.get('verified') else '  (unverified)'}")
+        up = eg.get("upcoming", [])
+        if up:
+            L.append("- T1 ahead:")
+            for e in up[:6]:
+                L.append(f"  - +{e['days_away']}d  {e['date']}  {e['name']} {e.get('time_et') or ''}"
+                         f"{'' if e.get('verified') else '  (unverified)'}")
 
-    up2 = [e for e in eg.get("upcoming_tier2", []) if e["days_away"] > 0]
-    if up2:
-        L.append("- Tier 2 ahead:")
-        for e in up2[:8]:
-            L.append(f"  - +{e['days_away']}d  {e['date']}  {e['name']} {e.get('time_et') or ''}")
-    L.append("- (ISM is in NEITHER tier — FRED doesn't carry it. Catch it in the step-2 web sweep,"
-             " along with Fed speakers.)")
+        up2 = [e for e in eg.get("upcoming_tier2", []) if e["days_away"] > 0]
+        if up2:
+            L.append("- Tier 2 ahead:")
+            for e in up2[:8]:
+                L.append(f"  - +{e['days_away']}d  {e['date']}  {e['name']} {e.get('time_et') or ''}")
+        L.append("- (ISM is in NEITHER tier — FRED doesn't carry it. Catch it in the step-2 web "
+                 "sweep, along with Fed speakers.)")
 
     L.append("\n## Index recap (daily close-to-close)")
     ir = d["index_recap"]
@@ -868,9 +1028,22 @@ def render_md(d: dict) -> str:
             L.append(f"- {v.get('label')} ({t}): {v.get('last')}  chg {v.get('chg')}  "
                      f"[{v.get('last_date')}] ({v.get('source', '?')})")
     ts = mp.get("term_structure")
-    if ts:
-        L.append(f"- TERM STRUCTURE: VIX9D {ts['vix9d']} vs VIX {ts['vix']} "
+    if ts and not ts.get("mixed_dates"):
+        L.append(f"- TERM STRUCTURE [both legs {ts.get('as_of')}, same-moment]: "
+                 f"VIX9D {ts['vix9d']} vs VIX {ts['vix']} "
                  f"(spread {ts['spread_9d_minus_30d']}) -> {ts['state']}")
+    elif ts and ts.get("aligned"):
+        L.append(f"- TERM STRUCTURE ⚠️ legs are from DIFFERENT sessions — VIX9D only "
+                 f"recomputes in RTH, so it is the {ts['vix9d_date']} close while VIX is "
+                 f"live {ts['vix_date']}.")
+        L.append(f"    QUOTE THIS (aligned at the {ts['as_of']} close): "
+                 f"VIX9D {ts['vix9d']} vs VIX {ts['vix_at_that_close']} "
+                 f"(spread {ts['spread_9d_minus_30d']}) -> {ts['state']}")
+        L.append(f"    VIX has since moved to {ts['vix_live']} ({ts['vix_live_chg']:+}). "
+                 f"The raw live-minus-stale spread would read "
+                 f"{ts['spread_raw_unaligned']:+} — do NOT quote that.")
+    elif ts:
+        L.append(f"- TERM STRUCTURE: ⚠️ UNAVAILABLE — {ts.get('note')}")
 
     cc = d.get("source_crosscheck", {})
     if cc:
@@ -928,6 +1101,12 @@ def render_md(d: dict) -> str:
         L.append(f"    full-chain ({fc['n_expirations']} exp, thru {fc.get('last_expiration')}): "
                  f"regime **{fc['regime']}**, total {_bn(fc['total_gex'])}, "
                  f"zero-gamma flip {fc['flip']}, call wall {fc['call_wall']}, put wall {fc['put_wall']}")
+        # Silent when the chain is healthy (the normal case — measured 0.0% dropped).
+        # This only ever appears when the feed is degraded, and it is a note to the
+        # WRITER, not brief copy: see playbook.md's "never publish process notes".
+        warn = fc.get("data_warning") or nt.get("data_warning")
+        if warn:
+            L.append(f"    🔴 CHAIN INCOMPLETE — {warn}")
 
     L.append("\n## Finnhub headlines")
     fh = d["finnhub"]
@@ -942,14 +1121,53 @@ def render_md(d: dict) -> str:
     return "\n".join(L)
 
 
+def _archive_previous_run(date: str) -> str | None:
+    """Move an existing same-day data block into data/runs/ before it gets overwritten.
+
+    A published brief's only link back to the numbers it was written from is its
+    freshness stamp (the gatherer's `as_of_et`). A second run of the day overwrote
+    data/{date}.json in place, so that link broke silently — measured on 3 of 19 July
+    days (7/16 by 4 min, 7/30 by 41 min, 7/27 by 91 min), and the published error
+    tracked the gap: 7/27's NQ change was 1.39pp away from the stored block. `data/`
+    is gitignored, so the original run was simply gone.
+
+    Deliberately archive rather than rename the live file: data/{date}.json stays
+    "the latest run", so playbook.md, brief-live and anything else reading that path
+    are untouched. The archive is keyed by the SAME HH:MM the brief's stamp shows, so
+    any past brief resolves to exactly one file with no extra bookkeeping.
+
+    Returns the archived run's HHMM, or None if there was nothing to archive.
+    """
+    j = DATA_DIR / f"{date}.json"
+    if not j.exists():
+        return None
+    try:
+        stamp = dt.datetime.fromisoformat(
+            json.loads(j.read_text(encoding="utf-8"))["as_of"]).strftime("%H%M")
+    except Exception:
+        stamp = dt.datetime.fromtimestamp(j.stat().st_mtime).strftime("%H%M")
+    runs = DATA_DIR / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    j.replace(runs / f"{date}-{stamp}.json")
+    md = DATA_DIR / f"{date}.data.md"
+    if md.exists():
+        md.replace(runs / f"{date}-{stamp}.data.md")
+    return stamp
+
+
 def main() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     BRIEFS_DIR.mkdir(parents=True, exist_ok=True)
     d = gather()
+    archived = _archive_previous_run(d["date"])   # only after gather() succeeds
     (DATA_DIR / f"{d['date']}.json").write_text(json.dumps(d, indent=2, default=str), encoding="utf-8")
     md = render_md(d)
     (DATA_DIR / f"{d['date']}.data.md").write_text(md, encoding="utf-8")
     print(md)
+    if archived:
+        print(f"\n[gather] NOTE: an earlier run from {archived[:2]}:{archived[2:]} ET already "
+              f"existed for {d['date']} — archived to data/runs/{d['date']}-{archived}.*  "
+              f"A brief stamped with that time was written from THAT block, not this one.")
     print(f"\n[gather] wrote data/{d['date']}.json + data/{d['date']}.data.md ; "
           f"the finished brief goes to briefs/{d['date']}.md")
 
