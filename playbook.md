@@ -33,6 +33,14 @@ calls: it informs the reader's own regime call.
          it on the day.
        - **Scheduled Fed-speaker / Chair appearances and testimony** — and check whether a
          **blackout** is in force, because then there are none (7/30 was inside one).
+         🔑 **Use the Fed's own calendar as the authority — `federalreserve.gov/newsevents/
+         {yyyy}-{month}.htm`** (e.g. `2026-august.htm`). It fetches cleanly, lists speaker +
+         title + time, and is the only source that settles a date argument. *(Why this is
+         pinned: the 2026-08-04 brief published **Bowman 12:45 and Cook 16:05 as that day's**
+         events. The Fed calendar has **Cook on 08-05** and **Bowman on 08-08** — both were
+         wrong, off by a day and four days, and it went out. A general web search will happily
+         return a speaker's event without its date attached.)* **Never carry a speaker list
+         forward from yesterday's brief** — re-fetch the month page every run.
        - **One-off and second-tier prints** — UMich sentiment, CB consumer confidence,
          Chicago PMI, ECI, durable goods, Treasury refunding. The 7/17 brief lost the 10:00
          UMich print exactly here.
@@ -48,11 +56,49 @@ calls: it informs the reader's own regime call.
 
 3. **Write the brief** to the 6-section template below.
 
+3b. **Write the CARD block** — the TL;DR image's input. At the very bottom of the brief md,
+   after the disclaimer, add:
+   ```
+   <!-- CARD
+   Lead phrase | the supporting clause, one sentence
+   ... 3 or 4 of these, most important first ...
+   Gate: what's actually on the calendar today
+   -->
+   ```
+   Rules for it:
+   - **3 or 4 points, never more** — it's the thing someone reads instead of scrolling.
+   - The lead is 2–5 words and states a *conclusion*, not a topic ("Oil did all the work",
+     not "Oil"). The clause carries the number that proves it.
+   - **Points are the writer's judgement — this is the one part no script can produce.**
+     Nothing generates them; if the block is missing, the card falls back to the first bullet
+     of each section, which is always visibly worse.
+   - `Gate:` overrides the footer. Write it yourself whenever the day has something the event
+     gate can't see (ISM, Fed speakers, one-offs). **The gate's `today_is_t1: False` still
+     only means "not a prop-firm restricted day"** — a card that reads "nothing today" on an
+     ISM morning is the 7/30 mistake published as a graphic.
+   - Every number in it must already appear in the brief. No new claims on the card.
+
 4. **Output:** print the brief copy-paste-ready in the CLI, save it to
-   `briefs/{YYYY-MM-DD}.md`, then post it to Discord:
+   `briefs/{YYYY-MM-DD}.md`, render the TL;DR card and post both:
+
+   ⚠️ **CHECK THE CLOCK AGAINST TODAY'S RELEASE TIMES BEFORE POSTING.** Writing the brief takes
+   real time, and a scheduled print can land inside that gap — at which point the 🚨 Event gate
+   is advertising as *upcoming* something every reader already knows the answer to, and the
+   futures/yields in the brief are pre-print. **If anything on today's calendar has printed
+   since `as_of_et`: fetch the actual number, re-run `gather.py`, and rewrite from the new
+   block** (which means a new freshness stamp — see the stamp rule below). *(2026-08-05: the
+   8:15 ADP landed 6 min after a 7:54 pull and missed badly, +44k vs ~68k. Caught at 8:21 only
+   because the clock was checked; the brief would otherwise have published "ADP 8:15 ET (~68k
+   expected)" as a forward-looking line, with pre-ADP futures under it.)*
    ```
-   .venv/Scripts/python.exe post_discord.py briefs/{YYYY-MM-DD}.md
+   .venv/Scripts/python.exe tldr_card.py briefs/{YYYY-MM-DD}.md          # preview the PNG
+   .venv/Scripts/python.exe tldr_card.py briefs/{YYYY-MM-DD}.md --post   # card, then brief
    ```
+   The card's number strip (futures, VIX, 10Y, WTI, SPY gamma) is read from
+   `data/{date}.json` — the same block the brief was written from — so it can never disagree
+   with the text. **Look at the PNG before posting.**
+
+   Text-only, no card: `.venv/Scripts/python.exe post_discord.py briefs/{YYYY-MM-DD}.md`
    (fans out to every webhook in `DISCORD_WEBHOOK_URL`; use `--dry` to preview the split).
 
 ## Hard rules (non-negotiable)
@@ -95,12 +141,17 @@ calls: it informs the reader's own regime call.
   🚨 Event gate section entirely from the step-2 web sweep, and tell the user in the CLI
   so the file gets fixed. `⚠️ N calendar entries skipped as malformed` is the milder
   version: the calendar below it is usable, just treat it as possibly missing one event.
-- **`🔴 CHAIN INCOMPLETE` in the GEX section = do NOT write a regime call.** It means part
-  of the option chain came back without greeks or open interest, so GEX is understated —
-  and an understated GEX *looks exactly like* a shift to negative gamma. Write the 🧭 Regime
-  read from vol and price action instead, say the gamma read is unavailable today in one
-  short clause, and **tell the user in the CLI, not in the brief** (this is a process note).
-  It stays silent on a healthy chain, so if you see it, it's real.
+- **`🔴 CHAIN INCOMPLETE` in the GEX section = do NOT write a regime call.** It means option
+  **open interest** went missing from the chain, so GEX is understated — and an understated
+  GEX *looks exactly like* a shift to negative gamma. Write the 🧭 Regime read from vol and
+  price action instead, say the gamma read is unavailable today in one short clause, and
+  **tell the user in the CLI, not in the brief** (this is a process note).
+  🔑 **Trust this line — but only this line.** Do NOT talk yourself into suppressing the
+  gamma read off a raw dropped-contract count you spot in the JSON. Newly-listed strikes
+  come back with no greeks and zero OI, contribute exactly zero GEX, and routinely push
+  `dropped_pct` to 3–5% on a perfectly healthy chain; `dropped_oi_pct` is what the alarm
+  reads. *(Retuned 2026-08-06 after the count gate cost three straight mornings of gamma
+  reads. If `data_warning` is null, the chain is fine no matter what the count says.)*
 
 ## Canonical headers — COPY VERBATIM (do not improvise emoji or wording)
 
@@ -118,9 +169,12 @@ Use the gatherer's stamp verbatim — exact wording `*Data pulled {as_of_et}*`, 
 match the block you actually wrote from.** If you re-run `gather.py`, you are now writing
 from a NEW block: re-read it and update the stamp, or don't re-run. The gatherer archives
 the superseded block to `data/runs/{date}-{HHMM}.json` and prints a NOTE when it does —
-that HHMM is the same one the stamp shows, so a stamped brief always resolves to exactly
-one data file. *(On 7/16, 7/27 and 7/30 the stamp and the stored block disagreed by 4, 91
-and 41 minutes; 7/27's published NQ change was 1.39pp off the stored numbers as a result.)*
+that HHMM is the same one the stamp shows — **ET, like every timestamp here** — so a stamped
+brief always resolves to exactly one data file. *(On 7/16, 7/27 and 7/30 the stamp and the
+stored block disagreed by 4, 91 and 41 minutes; 7/27's published NQ change was 1.39pp off the
+stored numbers as a result. And until 2026-08-04 the archive name itself came off a naive
+LOCAL clock, so on a non-ET machine it never matched the stamp anyway — 9:31 AM ET filed as
+`-0831`. Both are tz-aware ET now.)*
 
 **Then a short `**TL;DR:**` bold lead line** (community readers skim).
 

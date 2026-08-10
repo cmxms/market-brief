@@ -99,10 +99,14 @@ GEX_SYMBOLS = ("SPY", "QQQ")
 GEX_NEAR_EXPIRATIONS = 4   # nearest N expirations for the intraday regime read (matches the recorded baseline)
 # A contract with no gamma or no open interest can't be used and gets skipped. That is
 # normally fine — but if Tradier's greeks degrade, GEX shrinks toward zero and every field
-# still looks plausible, which is what a real regime flip looks like. So: count the skips
-# and speak up past this share. Measured 2026-08-02: 0 dropped of 13,898 SPY / 12,386 QQQ,
-# i.e. the healthy baseline is a clean 0.0%. 2% is well clear of that and still early.
-# The raw counts go in the JSON every run so this can be retuned from real data later.
+# still looks plausible, which is what a real regime flip looks like. So: measure the skips
+# and speak up past this share.
+#
+# ⚠️ This threshold applies to `dropped_oi_pct` — the share of OPEN INTEREST excluded — and
+# never to the raw contract count. See `_gex_from_options` for the measurement that settled
+# it: newly-listed strikes come back with no greeks and OI == 0, contribute exactly zero
+# GEX, and pushed the count to 5.42% on 2026-08-06 while the OI measure sat at 0.0%. Gating
+# on the count cost three straight mornings of gamma reads (08-04, 08-05, 08-06).
 GEX_DROP_WARN_PCT = 2.0
 
 # Treasury yields: source from the US Treasury's own Daily Par Yield Curve (the
@@ -707,13 +711,26 @@ def _gex_from_options(options, spot: float) -> dict:
     Contracts missing gamma or open interest are unusable and get skipped. We COUNT the
     skips rather than dropping them in silence: a degraded greeks feed shrinks GEX toward
     zero while every field stays plausible, and a shrinking GEX is exactly what a genuine
-    regime flip looks like. `dropped_oi_pct` is the better alarm of the two — open interest
-    is the multiplier in the formula, so it approximates how much GEX actually went missing,
-    whereas a count treats a dead deep-OTM strike the same as an at-the-money one.
+    regime flip looks like.
+
+    🔑 The alarm fires on `dropped_oi_pct`, NEVER on the raw count. Open interest is the
+    multiplier in the GEX formula, so a contract with OI == 0 contributes EXACTLY zero —
+    its absence cannot understate anything no matter how many of them there are, and a
+    count cannot tell that apart from a real degradation. Measured across every run from
+    2026-08-03 to 08-06: 100% of drops were newly-listed strikes that Tradier returns with
+    no `greeks` block at all and OI == 0 (08-06: SPY 656 of 656, QQQ 700 of 700), and
+    `dropped_oi_pct` was 0.0% in every sample ever recorded while `dropped_pct` ran as high
+    as 5.42%. The old `max(count, oi)` gate therefore suppressed a perfectly good gamma
+    read on three consecutive mornings. New listings arrive in bursts, so the count will
+    keep spiking — it stays in the JSON as chain-composition context, not as an alarm.
+
+    `n_dropped_oi_unknown` is the one case the OI measure genuinely cannot see: if open
+    interest itself is missing, the loss is unbounded rather than zero, so it alarms on
+    sight. Never fold that into `dropped_oi` as a 0 — that reports an unknown as harmless.
     """
     by_strike: dict[float, float] = {}
     call_total = put_total = 0.0
-    n = n_dropped = 0
+    n = n_dropped = n_oi_unknown = 0
     used_oi = dropped_oi = 0.0
     for o in options:
         g = (o.get("greeks") or {}).get("gamma")
@@ -721,9 +738,9 @@ def _gex_from_options(options, spot: float) -> dict:
         if g is None or oi is None or strike is None or otype not in ("call", "put"):
             n_dropped += 1
             try:
-                dropped_oi += float(oi or 0)
+                dropped_oi += float(oi)
             except (TypeError, ValueError):
-                pass
+                n_oi_unknown += 1
             continue
         gex = float(g) * float(oi) * 100.0 * (spot ** 2) * 0.01
         by_strike[strike] = by_strike.get(strike, 0.0) + (gex if otype == "call" else -gex)
@@ -738,11 +755,16 @@ def _gex_from_options(options, spot: float) -> dict:
     oi_seen = used_oi + dropped_oi
     drop_oi_pct = round(100.0 * dropped_oi / oi_seen, 2) if oi_seen else None
     warn = None
-    if max(drop_pct or 0.0, drop_oi_pct or 0.0) >= GEX_DROP_WARN_PCT:
-        warn = (f"{n_dropped} of {seen} contracts ({drop_pct}%) had no gamma/open-interest "
-                f"and were excluded — {drop_oi_pct}% of open interest. GEX is computed from "
-                f"an incomplete chain and is UNDERSTATED; treat the regime/flip/walls as "
-                f"unreliable rather than as a change in positioning.")
+    if (drop_oi_pct or 0.0) >= GEX_DROP_WARN_PCT:
+        warn = (f"{drop_oi_pct}% of open interest ({n_dropped} of {seen} contracts) came back "
+                f"without usable greeks and was excluded. Open interest is the multiplier in "
+                f"the GEX formula, so that much missing OI means GEX is materially "
+                f"UNDERSTATED; treat the regime/flip/walls as unreliable rather than as a "
+                f"change in positioning.")
+    elif n_oi_unknown:
+        warn = (f"{n_oi_unknown} of {seen} contracts reported NO open interest at all, so how "
+                f"much GEX went missing cannot be measured. Treat the regime/flip/walls as "
+                f"unverified.")
     total = sum(by_strike.values())
     flip = _zero_gamma_level(by_strike)
     top = sorted(by_strike.items(), key=lambda kv: abs(kv[1]), reverse=True)[:5]
@@ -759,8 +781,9 @@ def _gex_from_options(options, spot: float) -> dict:
         # Recorded every run, healthy or not, so the warn threshold can be retuned from
         # real data instead of one sample. Only `data_warning` is ever surfaced.
         "n_dropped": n_dropped,
-        "dropped_pct": drop_pct,
-        "dropped_oi_pct": drop_oi_pct,
+        "dropped_pct": drop_pct,          # chain-composition context only — NOT the alarm
+        "dropped_oi_pct": drop_oi_pct,    # the alarm: OI is the multiplier in the formula
+        "n_dropped_oi_unknown": n_oi_unknown,
         "data_warning": warn,
     }
 
@@ -915,7 +938,12 @@ def gather(today: dt.date | None = None) -> dict:
     today = today or dt.datetime.now().date()
     _et = pd.Timestamp.now(tz="America/New_York")
     return {
-        "as_of": dt.datetime.now().isoformat(timespec="seconds"),
+        # ET, not local. This field names the data/runs/ archive (_archive_previous_run),
+        # and a naive local clock silently offset every archived filename from the brief's
+        # own ET stamp — on a UTC-1 machine the 9:31 AM ET run archived as `-0831`, so the
+        # "a stamped brief resolves to exactly one block" contract failed quietly. Keeping
+        # it tz-aware also survives the DST changeover, which a fixed offset would not.
+        "as_of": _et.isoformat(timespec="seconds"),
         "as_of_et": _et.strftime("%a %b %d, %Y ") + _et.strftime("%I:%M %p").lstrip("0") + " ET",
         "date": str(today),
         "event_gate": event_gate(today),
@@ -1101,9 +1129,11 @@ def render_md(d: dict) -> str:
         L.append(f"    full-chain ({fc['n_expirations']} exp, thru {fc.get('last_expiration')}): "
                  f"regime **{fc['regime']}**, total {_bn(fc['total_gex'])}, "
                  f"zero-gamma flip {fc['flip']}, call wall {fc['call_wall']}, put wall {fc['put_wall']}")
-        # Silent when the chain is healthy (the normal case — measured 0.0% dropped).
-        # This only ever appears when the feed is degraded, and it is a note to the
-        # WRITER, not brief copy: see playbook.md's "never publish process notes".
+        # Silent when the chain is healthy. "Healthy" means no OPEN INTEREST went missing —
+        # a nonzero `dropped_pct` alone is normal (newly-listed strikes carry no greeks and
+        # no OI, and contribute exactly zero GEX). This only appears when the feed is truly
+        # degraded, and it is a note to the WRITER, not brief copy: see playbook.md's
+        # "never publish process notes".
         warn = fc.get("data_warning") or nt.get("data_warning")
         if warn:
             L.append(f"    🔴 CHAIN INCOMPLETE — {warn}")
@@ -1136,6 +1166,11 @@ def _archive_previous_run(date: str) -> str | None:
     are untouched. The archive is keyed by the SAME HH:MM the brief's stamp shows, so
     any past brief resolves to exactly one file with no extra bookkeeping.
 
+    That key is **ET**, from the block's own tz-aware `as_of` — the same clock as the
+    stamp. It read a naive LOCAL `as_of` until 2026-08-04, which silently offset every
+    archived name from the stamp by the machine's UTC offset (the 9:31 AM ET run landed
+    as `-0831`), quietly breaking the one-file guarantee this docstring promises.
+
     Returns the archived run's HHMM, or None if there was nothing to archive.
     """
     j = DATA_DIR / f"{date}.json"
@@ -1145,7 +1180,9 @@ def _archive_previous_run(date: str) -> str | None:
         stamp = dt.datetime.fromisoformat(
             json.loads(j.read_text(encoding="utf-8"))["as_of"]).strftime("%H%M")
     except Exception:
-        stamp = dt.datetime.fromtimestamp(j.stat().st_mtime).strftime("%H%M")
+        # Same reason as `as_of` above: mtime is local, so convert to ET before naming.
+        stamp = pd.Timestamp(j.stat().st_mtime, unit="s", tz="UTC").tz_convert(
+            "America/New_York").strftime("%H%M")
     runs = DATA_DIR / "runs"
     runs.mkdir(parents=True, exist_ok=True)
     j.replace(runs / f"{date}-{stamp}.json")

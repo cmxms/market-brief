@@ -47,6 +47,14 @@ def _load_dotenv() -> None:
 _load_dotenv()
 
 
+def _strip_comments(md: str) -> str:
+    """Drop `<!-- ... -->` blocks. Discord does NOT hide HTML comments — it prints them
+    literally — so the brief's `<!-- CARD -->` block (the TL;DR image's input, see
+    tldr_card.py) would otherwise be published as visible junk."""
+    import re
+    return re.sub(r"\n?<!--.*?-->\n?", "\n", md, flags=re.S)
+
+
 def _split_long(section: str) -> list[str]:
     """Hard-split a single oversize section by lines, keeping ``` code fences balanced
     (close the fence at a break, reopen it on the next message). Rare safety net."""
@@ -69,6 +77,7 @@ def _split_long(section: str) -> list[str]:
 def chunk(brief_md: str) -> list[str]:
     """Split the brief into <=LIMIT-char messages on `## ` section boundaries.
     The title + TL;DR ride in the first chunk; each section packs in greedily."""
+    brief_md = _strip_comments(brief_md)
     lines = brief_md.strip("\n").split("\n")
     sections: list[str] = []
     cur: list[str] = []
@@ -150,13 +159,53 @@ def _post_one(webhook: str, msgs: list[str]) -> None:
             time.sleep(0.7)
 
 
-def post(brief_md: str, webhook: str | list[str] | None = None) -> str:
-    """Post the brief to every configured Discord webhook (fan-out to N servers).
+def _send_file(webhook: str, path: Path, content: str = "") -> None:
+    """POST one image as a multipart attachment (Discord renders PNGs inline). Same 429
+    retry as _send, same locked-down allowed_mentions."""
+    payload = {"content": content, "allowed_mentions": {"parse": []}}
+    for _ in range(4):
+        with path.open("rb") as fh:
+            r = requests.post(
+                webhook,
+                data={"payload_json": __import__("json").dumps(payload)},
+                files={"file": (path.name, fh, "image/png")},
+                timeout=45,
+            )
+        if r.status_code == 429:
+            wait = 2.0
+            try:
+                wait = float(r.json().get("retry_after", 2.0))
+            except Exception:
+                pass
+            time.sleep(wait + 0.5)
+            continue
+        r.raise_for_status()
+        return
+    raise RuntimeError("Discord image upload failed after retries (429)")
 
-    `webhook` overrides the env (a single URL or a list); otherwise the URLs come from
-    DISCORD_WEBHOOK_URL (+ DISCORD_WEBHOOK_URLS). Each webhook is delivered independently: if one
-    server's webhook fails (deleted/expired/rate-limited out), the others still get the brief and
-    we only raise if EVERY webhook failed — so adding a friend's server can't break your own feed."""
+
+def post_image(path: str | Path, webhook: str | list[str] | None = None, content: str = "") -> str:
+    """Upload one PNG to every configured webhook. Same independent-delivery contract as
+    post(): one server failing never blocks the others, and we only raise if all failed."""
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(p)
+    webhooks = _resolve(webhook)
+    ok, failed = [], []
+    for w in webhooks:
+        try:
+            _send_file(w, p, content)
+            ok.append(w)
+        except Exception as e:
+            failed.append(w)
+            print(f"  WARN Discord image upload failed ({_redact(w)}): {e}", flush=True)
+    if not ok:
+        raise RuntimeError(f"all {len(webhooks)} Discord webhook(s) failed on image upload")
+    return f"posted image to {len(ok)}/{len(webhooks)} webhook(s)" + (f" — {len(failed)} FAILED" if failed else "")
+
+
+def _resolve(webhook: str | list[str] | None) -> list[str]:
+    """Env, a single URL, or an explicit list -> the list of webhooks to deliver to."""
     if webhook is None:
         webhooks = _webhooks_from_env()
     elif isinstance(webhook, str):
@@ -165,6 +214,17 @@ def post(brief_md: str, webhook: str | list[str] | None = None) -> str:
         webhooks = [w.strip() for w in webhook if w and w.strip()]
     if not webhooks:
         raise RuntimeError("missing DISCORD_WEBHOOK_URL (or DISCORD_WEBHOOK_URLS)")
+    return webhooks
+
+
+def post(brief_md: str, webhook: str | list[str] | None = None) -> str:
+    """Post the brief to every configured Discord webhook (fan-out to N servers).
+
+    `webhook` overrides the env (a single URL or a list); otherwise the URLs come from
+    DISCORD_WEBHOOK_URL (+ DISCORD_WEBHOOK_URLS). Each webhook is delivered independently: if one
+    server's webhook fails (deleted/expired/rate-limited out), the others still get the brief and
+    we only raise if EVERY webhook failed — so adding a friend's server can't break your own feed."""
+    webhooks = _resolve(webhook)
 
     msgs = chunk(brief_md)
     ok: list[str] = []

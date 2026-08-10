@@ -101,18 +101,56 @@ plausible — and a shrinking GEX is exactly what a genuine regime flip looks li
 on a synthetic chain: dropping 30% of contracts took GEX from **+7.19bn "positive"** to
 **−6.52bn "negative"** while regime, flip, walls and `n_contracts` all still read normally.
 
-So every run records `n_dropped`, `dropped_pct` and `dropped_oi_pct` in the JSON — **always,
-healthy or not**, so the threshold can later be retuned from real data rather than one sample.
-`data_warning` is set only past `GEX_DROP_WARN_PCT` (2.0), and the rendered block prints a
-`🔴 CHAIN INCOMPLETE` line only when it's set. **Silent on a healthy chain** — measured
-2026-08-02: 0 dropped of 13,898 SPY and 12,386 QQQ contracts, a clean 0.0% baseline.
+So every run records `n_dropped`, `dropped_pct`, `dropped_oi_pct` and `n_dropped_oi_unknown`
+in the JSON — **always, healthy or not**, so the threshold can be retuned from real data
+rather than one sample. `data_warning` is set past `GEX_DROP_WARN_PCT` (2.0), and the rendered
+block prints a `🔴 CHAIN INCOMPLETE` line only when it's set.
 
-`dropped_oi_pct` is the better of the two alarms: open interest is the multiplier in the GEX
-formula, so it tracks how much GEX actually went missing, whereas a raw count treats a dead
-deep-OTM strike the same as an at-the-money one. It is deliberately the more sensitive trigger.
+**🔑 The alarm fires on `dropped_oi_pct` ONLY — never on the raw count** *(retuned 2026-08-06,
+and this is the whole point of the guard)*. Open interest is the multiplier in the GEX formula,
+so a contract with **OI == 0 contributes exactly zero GEX**; excluding it cannot understate
+anything however many there are. A count cannot tell that apart from a real degradation.
+
+The original 2% threshold was set against a single 2026-08-02 sample that happened to read 0
+dropped of 13,898 SPY / 12,386 QQQ. That baseline was **not representative**, and the gate was
+`max(dropped_pct, dropped_oi_pct)`, so the count could trip it alone. What actually happens:
+Tradier returns **no `greeks` block at all** for newly-listed strikes, which also carry **zero
+open interest**. New listings arrive in bursts, so the count spikes on arbitrary mornings.
+
+Measured over every run with instrumentation (2026-08-03 → 08-06), **`dropped_oi_pct` was 0.0%
+in 100% of samples** while `dropped_pct` ran to **5.42%**. On 2026-08-06, **every single drop**
+was this shape — SPY 656 of 656, QQQ 700 of 700, all with the greeks block absent and OI == 0.
+The count gate suppressed a perfectly good gamma read on **three consecutive mornings**
+(08-04, 08-05, 08-06). Re-running 08-06 after the retune returned **byte-identical** GEX,
+flip and walls with no warning — proof the drops never touched the number.
+
+⚠️ **`n_dropped_oi_unknown` is the case the OI measure cannot see.** If open interest itself is
+missing, the loss is *unbounded*, not zero — so it alarms on sight. The old code did
+`float(oi or 0)`, which silently booked an unknown as harmless; it now counts separately. This
+has never fired on real data (0 occurrences in every sample), but it is the failure mode that
+would make `dropped_oi_pct` lie.
+
+Guard behaviour is pinned by `tests/test_gex_guard.py` (5 cases, no pytest needed): zero-OI
+drops stay silent, greeks lost on contracts holding real OI fire, absent OI fires, a clean
+chain stays silent, and zero-OI drops are asserted to leave GEX/flip/walls bit-identical.
 
 ⚠️ **This is a note to the brief WRITER, never brief copy** — see playbook.md's "never publish
 process notes."
+
+**The card honors the same flag** (added 2026-08-05). `tldr_card.py`'s number strip used to read
+`gex.SPY.near_term.regime` unconditionally and print `SPY GAMMA: POSITIVE`. On 2026-08-05 that
+put a confident regime call on the graphic while the brief — correctly following the playbook —
+said the gamma read was unavailable. **The card contradicted the text it was rendered from.**
+It now prints `SPY GAMMA: N/A` in muted ink whenever `data_warning` is set — still correct,
+and it stays: the card must never assert a regime the brief withheld.
+
+🔑 **But the trigger underneath it was wrong, and the card fix hid that.** The 2026-08-05
+"first real trigger" (420 of 14,018 SPY, 352 of 12,566 QQQ, `dropped_oi_pct` **0.0%** on both)
+was never a degraded chain — it was newly-listed zero-OI strikes, and the count alarm fired
+while the alarm that tracks missing GEX did not. Making the card agree with the brief made
+both of them consistently wrong, and because the graphic now looked right, the false positive
+read as handled for three more mornings. **Retuned 2026-08-06** — see the guard section above.
+Worth remembering as a shape: *reconciling two outputs is not the same as validating either.*
 
 ## 8. Event gate
 
@@ -172,7 +210,10 @@ tagged against a theme keyword list, because a pure macro search misses sector c
 2. `data/{date}.data.md` — the same thing as a human-readable block
 3. `data/runs/{date}-{HHMM}.json` + `.data.md` — a **superseded** run, moved here automatically
    before a re-run overwrites it (added 2026-08-02). `HHMM` is the same time the brief's
-   freshness stamp carries, so a stamped brief resolves to exactly one block.
+   freshness stamp carries — **ET, like every timestamp this repo publishes** — so a stamped
+   brief resolves to exactly one block. *(Fixed 2026-08-04: the name came off a naive LOCAL
+   `as_of`, so on a non-ET machine every archived file was offset from the stamp it was
+   supposed to match — 9:31 AM ET archived as `-0831`. Both clocks are now tz-aware ET.)*
    **Why this exists:** the whole point of `gather.py` is that the brief is never built on the
    model's memory — the stored block is the proof. A second run used to overwrite it silently,
    which happened on **3 of 19** July days (7/16, 7/27, 7/30) and left the published numbers
