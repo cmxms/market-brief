@@ -6,6 +6,61 @@ Scope note (2026-08-01): this repo does two things — **gather the numbers and 
 brief**, then **post it to Discord**. The Brief Live dashboard was split out to
 `CMTMS/brief-live/`; its backlog went with it. Don't add board work here.
 
+## Open (2026-08-04) — the CHAIN INCOMPLETE flag needs two small fixes
+
+Both surfaced when the flag fired for the **first time in 22 runs** — and it was a false
+positive. A run stamped 9:31 AM ET (≈1 min after the open) caught Tradier's greeks
+mid-repopulate; re-pulled 20 min later, 0 dropped of 13,944 SPY / 12,632 QQQ. The three prior
+post-open runs (9:59 / 10:26 / 10:51) were clean, so the unsafe window is the **first few
+minutes of RTH**, not "after the open" generally.
+
+- 🟡 **`render_md` doesn't say WHICH view is degraded.** It does
+  `warn = fc.get("data_warning") or nt.get("data_warning")` and prints one unlabelled line under
+  the symbol. On 08-04 only `full_chain` was affected — `near_term` was 0-dropped on both
+  symbols — but it reads as symbol-wide, so the gamma call got killed on a clean view. Label the
+  view, or warn per-view.
+- [x] 🟡 **`tldr_card.py` chain-incomplete awareness — DONE 2026-08-05.** ~~It printed
+  `SPY GAMMA POSITIVE` straight from the JSON regardless.~~ It now prints `SPY GAMMA N/A` in
+  muted ink when `near_term.data_warning` is set. **The bug fired for real on 08-05:** the brief
+  correctly said the gamma read was unavailable and the card stamped POSITIVE on the graphic
+  from the same JSON file. 🔑 **The design assumption was wrong, and it's worth stating.**
+  "Card and brief read the same JSON, so they can't disagree" protects against *stale numbers*
+  only — it does nothing about a **playbook rule that gags a conclusion**, because the card
+  never knew the rule existed. **Audit the rest of the number strip for the same shape** before
+  the card goes live: any tile reading a field the playbook can suppress has this bug.
+- 🟢 **Threshold evidence — now TWO independent samples, and they agree.** Warn is
+  `max(drop_pct, drop_oi_pct) >= 2.0`. On 08-04 `drop_pct` was 2.34% / 4.7% with
+  **`drop_oi_pct` 0.0%**. On 08-05, both runs (07:54 and 08:22, identical figures) gave
+  **SPY 420/14,018 = 3.0%** and **QQQ 352/12,566 = 2.8%**, again with **`drop_oi_pct` 0.0%**
+  on both symbols. Gating on `drop_oi_pct` alone would not have fired either day. Two false
+  positives, zero true positives, same signature every time: dead strikes with no open
+  interest, contributing exactly zero gamma. **Recommend gating on `drop_oi_pct` and keeping
+  `drop_pct` as a logged-only diagnostic.**
+  ⚠️ **This also REFUTES the 08-04 hypothesis written directly above.** That note blamed
+  "Tradier's greeks mid-repopulate in the **first few minutes of RTH**" — 08-05 fired at
+  **07:54 and 08:22, both pre-market**, nowhere near the open. Whatever this is, it isn't an
+  RTH-open artifact. Cost so far: the gamma read killed on 2 of 24 runs, both times on a
+  chain that was fine.
+
+## Fixed 2026-08-04 — archive filenames were on a local clock, not ET
+
+`gather.py` stored two timestamps per run: `as_of_et` (tz-aware ET, what the brief's
+freshness stamp prints — always correct) and `as_of` (**naive local**). The `data/runs/`
+archive name came off the naive one, so on this machine (UTC−1 vs ET) every archived block
+was offset an hour from the stamp it's supposed to key to: the 9:31 AM ET run filed as
+`2026-08-04-0831`. Silent — no published number was ever wrong, but the "a stamped brief
+resolves to exactly one block" guarantee in `playbook.md` / `CURRENT-BEHAVIOUR.md` was false
+on every archived run since the feature landed 2026-08-02.
+
+Fix: `as_of` is now tz-aware ET (`_et.isoformat()`), and the mtime fallback converts to ET
+before naming. Existing archive backfilled (`-0831` → `-0931`); the live block's `as_of` was
+rewritten in ET so the next re-run archives correctly. Docs synced in the same pass.
+
+⚠️ **Worth re-checking:** the naive-clock offset may account for part of the 7/16, 7/27, 7/30
+stamp-vs-block gaps quoted in `playbook.md` (4 / 91 / 41 min). 91 min is bigger than the
+1-hour offset, so that one likely has a real re-run gap under it too — but the 41 and 4 minute
+figures were measured with the broken key and may not mean what they say.
+
 ## Code + logic audit (2026-08-02) — what's left
 
 Full audit of `gather.py` / `post_discord.py`, every claim tested against the 20 saved
