@@ -9,7 +9,10 @@ and vol regime sit, and what's on the event calendar. **Not** financial advice.
 
 - **Index futures** (ES/YM/NQ/RTY) + **oil** — live via yfinance
 - **Macro pulse** — Treasury yields (US Treasury par curve → CNBC/Yahoo live → FRED),
-  VIX + VIX9D term structure, with a CNBC-vs-Yahoo cross-check gate
+  and the **VIX curve from Cboe's own CSVs** (VIX9D/VIX/VIX3M/VIX6M, official settled
+  closes, all legs same session) with the VIX/VIX3M regime ratio and its 2-year
+  percentile. CNBC/Yahoo stay for the *live* pre-open tick — Cboe publishes after the
+  close — and keep their cross-check gate.
 - **Sector rotation** — the 11 SPDR sectors + semis/software/growth, ranked relative to SPY
 - **Dealer gamma (GEX)** for SPY + QQQ — computed from the live **Tradier** options chain
   (`gamma · OI · 100 · spot² · 0.01`, calls +, puts −). Two views:

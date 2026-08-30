@@ -28,6 +28,9 @@ minutes of RTH**, not "after the open" generally.
   only — it does nothing about a **playbook rule that gags a conclusion**, because the card
   never knew the rule existed. **Audit the rest of the number strip for the same shape** before
   the card goes live: any tile reading a field the playbook can suppress has this bug.
+  ⚠️ **Moot as of 2026-08-17 — the card is retired and the brief posts as text only.** The
+  audit only comes back if the card does. The *lesson* doesn't retire: any second renderer of
+  the same JSON re-opens this hole, because it won't know the playbook's suppression rules.
 - 🟢 **Threshold evidence — now TWO independent samples, and they agree.** Warn is
   `max(drop_pct, drop_oi_pct) >= 2.0`. On 08-04 `drop_pct` was 2.34% / 4.7% with
   **`drop_oi_pct` 0.0%**. On 08-05, both runs (07:54 and 08:22, identical figures) gave
