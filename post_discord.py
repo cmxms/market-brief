@@ -242,6 +242,131 @@ def post(brief_md: str, webhook: str | list[str] | None = None) -> str:
     return summary + (f" — {len(failed)} FAILED" if failed else "")
 
 
+# --------------------------------------------------------------------------------------
+# Stale-block check (added 2026-08-25)
+#
+# playbook.md step 4 says CHECK THE CLOCK AGAINST TODAY'S RELEASE TIMES BEFORE POSTING —
+# writing the brief takes real time, and a scheduled print can land inside that gap, at
+# which point the 🚨 Event gate advertises as *upcoming* something readers already know
+# and the futures/yields under it are pre-print.
+#
+# That check was the last timestamp in this pipeline still done by hand every run, and on
+# THIS machine the obvious way to do it is wrong: local is CDT, `date -u` is UTC, and
+# `TZ=America/New_York date` ignores the TZ and prints UTC labelled GMT. There is no shell
+# route to ET here. (Same root cause as the naive-LOCAL archive-name bug fixed 2026-08-04:
+# 9:31 AM ET filed as -0831.) So it moves into code, tz-aware, like everything else.
+#
+# It WARNS, never blocks: it surfaces the gap and the release times inside it, and leaves
+# the call to you. It cannot enumerate today's full calendar — the YAML carries T1/tier2
+# only, so one-offs (Case-Shiller, Conf Board, ISM, Fed speakers) come from the playbook's
+# step-2 web sweep and are invisible here. Hence the standard release-clock windows below:
+# candidates to check, not a verdict.
+# --------------------------------------------------------------------------------------
+
+ET = "America/New_York"
+
+# The US release clock. Not a calendar — a list of windows worth re-checking if the brief
+# straddled one. Times are ET.
+_RELEASE_CLOCK = [
+    ("08:30", "BLS / BEA window (CPI, jobs, PPI, PCE, GDP, claims)"),
+    ("09:00", "Case-Shiller / FHFA window"),
+    ("09:45", "S&P flash PMI window"),
+    ("10:00", "ISM / Conference Board / Census window"),
+    ("10:30", "EIA petroleum window"),
+]
+_MARKET_OPEN = "09:30"
+
+
+def _now_et():
+    """Current ET, tz-aware. Never read a wall clock off the shell on this box."""
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+    return datetime.now(timezone.utc).astimezone(ZoneInfo(ET))
+
+
+def _parse_stamp(brief_md: str):
+    """Pull the brief's own freshness stamp — `*Data pulled Tue Aug 25, 2026 8:43 AM ET*`.
+
+    Deliberately the BRIEF's stamp and not the JSON's `as_of_et`: the stamp is what the
+    reader sees and what the brief claims to be built from. Returns tz-aware ET or None."""
+    import re
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    m = re.search(r"\*Data pulled\s+(.+?)\s*ET\*", brief_md)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1).strip(), "%a %b %d, %Y %I:%M %p").replace(
+            tzinfo=ZoneInfo(ET))
+    except ValueError:
+        return None
+
+
+def _calendar_events_today(day) -> list[tuple[str, str]]:
+    """(time_et, name) for T1 + tier2 events on `day`, from that date's gather JSON.
+    Empty on any failure — this is a warning path and must never break a post."""
+    import json
+    try:
+        p = Path(__file__).resolve().parent / "data" / f"{day.isoformat()}.json"
+        eg = json.loads(p.read_text(encoding="utf-8")).get("event_gate", {})
+        return [(e.get("time_et", "??:??"), e.get("name", "?"))
+                for e in (eg.get("today_events") or []) + (eg.get("today_tier2") or [])]
+    except Exception:
+        return []
+
+
+def stale_check(brief_md: str) -> bool:
+    """Warn if release times fall between the brief's stamp and now. True if anything fired.
+
+    Returns False (quiet) when the stamp is unreadable or the brief isn't for today — a
+    backfill or a re-post of an old brief shouldn't nag."""
+    stamp = _parse_stamp(brief_md)
+    if stamp is None:
+        print("  NOTE stale-check skipped: no readable `*Data pulled ... ET*` stamp", flush=True)
+        return False
+    now = _now_et()
+    if stamp.date() != now.date():
+        return False
+
+    gap_min = int((now - stamp).total_seconds() // 60)
+    if gap_min < 0:
+        print(f"  NOTE stamp is {-gap_min} min in the FUTURE vs ET now — check the stamp", flush=True)
+        return False
+
+    def _in_gap(hhmm: str) -> bool:
+        h, m = (int(x) for x in hhmm.split(":"))
+        t = stamp.replace(hour=h, minute=m, second=0, microsecond=0)
+        return stamp < t <= now
+
+    crossed = sorted((t, n) for t, n in _calendar_events_today(now.date()) if _in_gap(t))
+    windows = [(t, lbl) for t, lbl in _RELEASE_CLOCK if _in_gap(t)]
+    if _in_gap(_MARKET_OPEN):
+        windows.append((_MARKET_OPEN, "MARKET OPEN — futures/yields in the brief are pre-open"))
+    windows.sort()
+
+    if not (crossed or windows):
+        return False
+
+    def _fmt(dt) -> str:
+        # %-I is glibc, %#I is MSVC; this runs on both.
+        return dt.strftime("%#I:%M %p" if os.name == "nt" else "%-I:%M %p")
+
+    print("", flush=True)
+    print("  ⚠  STALE BLOCK CHECK", flush=True)
+    print(f"  block as_of_et : {_fmt(stamp)} ET", flush=True)
+    print(f"  now            : {_fmt(now)} ET  (+{gap_min} min)", flush=True)
+    if crossed:
+        print("  calendar releases crossed in that gap:", flush=True)
+        for t, n in crossed:
+            print(f"    - {t}  {n}", flush=True)
+    if windows:
+        print("  windows crossed (calendar has T1/tier2 ONLY — check your step-2 sweep):", flush=True)
+        for t, lbl in windows:
+            print(f"    - {t}  {lbl}", flush=True)
+    print("  -> re-run gather.py and rewrite, or pass --stale-ok", flush=True)
+    return True
+
+
 if __name__ == "__main__":
     # Standalone: `python post_discord.py brief.md` posts; `--dry` just prints the split.
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
@@ -250,5 +375,14 @@ if __name__ == "__main__":
         parts = chunk(src)
         for i, m in enumerate(parts, 1):
             print(f"----- message {i}/{len(parts)} ({len(m)} chars) -----\n{m}\n")
+        if "--stale-ok" not in sys.argv:
+            stale_check(src)
     else:
+        if "--stale-ok" not in sys.argv and stale_check(src):
+            print("\n  posting anyway in 5s (Ctrl-C to abort)...", flush=True)
+            try:
+                time.sleep(5)
+            except KeyboardInterrupt:
+                print("  aborted.", flush=True)
+                sys.exit(1)
         print(post(src))

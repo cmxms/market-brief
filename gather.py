@@ -118,8 +118,24 @@ _TSY_COL = {"2Y": "2 Yr", "5Y": "5 Yr", "10Y": "10 Yr", "30Y": "30 Yr"}
 _FRED_SID = {"2Y": "DGS2", "5Y": "DGS5", "10Y": "DGS10", "30Y": "DGS30"}
 _YF_YIELD = {"5Y": "^FVX", "10Y": "^TNX", "30Y": "^TYX"}  # no 2Y proxy on yfinance
 
-# Vol stays on yfinance/CNBC (live, reliable): 30d + 9d VIX for term structure.
+# Vol has TWO legs, and the split matters:
+#   - CNBC/Yahoo for the LIVE pre-open tick. Cboe cannot do this (see below).
+#   - Cboe's own CSVs for the OFFICIAL SETTLED close and the term structure.
+# CNBC and Yahoo both redistribute Cboe's calculation, so cross-checking them against each
+# other only confirms that two relayers agree. This is the same source chain already used for
+# yields — issuer first (US Treasury par curve), live relay second.
 VOL_TICKERS = {"^VIX": "VIX (30d)", "^VIX9D": "VIX9D (9d)"}
+
+# Cboe publishes each index's full daily history as a keyless CSV on its own CDN.
+# 🔴 These publish AFTER THE CLOSE, so pre-open the newest row is the PRIOR session. That is
+# why the CNBC leg stays: Cboe is the official number, CNBC is the live one.
+CBOE_INDEX_CSV = "https://cdn.cboe.com/api/global/us_indices/daily_prices/{symbol}_History.csv"
+# Ordered by horizon — reading them together IS the term structure, no interpolation needed.
+CBOE_INDICES = {"VIX9D": "VIX9D (9d)", "VIX": "VIX (30d)",
+                "VIX3M": "VIX3M (3mo)", "VIX6M": "VIX6M (6mo)"}
+# Sessions the VIX/VIX3M percentile is measured over. ~2 years: long enough for a full regime
+# cycle, short enough that 2011's vol environment is not setting today's reference.
+CBOE_LOOKBACK = 504
 
 # Sector rotation: the 11 SPDR sector ETFs, ranked by performance RELATIVE to SPY
 # (relative isolates rotation from the broad market move). THEME_ETFS add within-tech
@@ -487,6 +503,96 @@ def _yahoo_vol() -> dict:
     return out
 
 
+def _cboe_index(symbol: str, tail: int = CBOE_LOOKBACK + 5) -> list[tuple[str, float]]:
+    """(date, close) rows for one Cboe vol index, oldest first. [] on any failure.
+
+    Dates arrive MM/DD/YYYY and leave ISO. Malformed lines are dropped rather than guessed.
+    """
+    try:
+        r = httpx.get(CBOE_INDEX_CSV.format(symbol=symbol),
+                      headers={"User-Agent": "Mozilla/5.0"}, timeout=25)
+        r.raise_for_status()
+    except Exception:
+        return []
+    rows = []
+    rd = csv.reader(io.StringIO(r.text))
+    try:
+        header = [h.strip().upper() for h in next(rd)]
+    except StopIteration:
+        return []
+    # VIX/VIX9D/VIX3M/VIX6M serve DATE,OPEN,HIGH,LOW,CLOSE; VVIX serves DATE,VVIX.
+    ci = 4 if (len(header) >= 5 and "OPEN" in header) else 1
+    for rec in rd:
+        try:
+            d = dt.datetime.strptime(rec[0].strip(), "%m/%d/%Y").date().isoformat()
+            rows.append((d, float(rec[ci])))
+        except (IndexError, TypeError, ValueError):
+            continue
+    rows.sort()
+    return rows[-tail:] if tail else rows
+
+
+def cboe_vol_official() -> dict:
+    """The OFFICIAL settled VIX curve from Cboe, plus where the regime ratio sits historically.
+
+    This is the issuer publishing its own calculation — the vol equivalent of the US Treasury
+    par-yield leg already used for yields. CNBC and Yahoo both redistribute this number.
+
+    🔑 **All four legs come from the same CSV family and carry their own date**, so the
+    VIX9D-vs-VIX alignment problem that `_vol_term_structure` has to work around cannot occur
+    here: `aligned` is a direct fact, not a reconstruction. Returns {} if VIX itself fails —
+    a curve without its anchor is not worth half-reporting.
+    """
+    series = {s: _cboe_index(s) for s in CBOE_INDICES}
+    if not series.get("VIX"):
+        return {}
+
+    levels, dates = {}, []
+    for sym, rows in series.items():
+        if not rows:
+            continue
+        d, c = rows[-1]
+        prev = rows[-2][1] if len(rows) > 1 else None
+        levels[sym] = {"last": round(c, 2), "date": d, "label": CBOE_INDICES[sym],
+                       "chg": round(c - prev, 2) if prev is not None else None}
+        dates.append(d)
+
+    out = {
+        "source": "Cboe official close (cdn.cboe.com daily index CSVs)",
+        "as_of": levels["VIX"]["date"],
+        "levels": levels,
+        "aligned": len(set(dates)) == 1,
+        "missing": [s for s in CBOE_INDICES if s not in levels],
+    }
+
+    vix = levels["VIX"]["last"]
+    v9 = levels.get("VIX9D", {}).get("last")
+    v3 = levels.get("VIX3M", {}).get("last")
+
+    if v9:
+        out["spread_9d_minus_30d"] = round(v9 - vix, 2)
+    if v3:
+        ratio = round(vix / v3, 4)
+        out["vix_vix3m"] = ratio
+        # Definitional, not a judgment: below 1.0 the next month is priced calmer than the
+        # next quarter. The percentile beside it is CONTEXT for a regime read, never a gate.
+        out["state"] = ("CONTANGO (30d < 3mo — normal)" if ratio < 1.0
+                        else "BACKWARDATION (30d > 3mo — near-term stress)")
+
+        # Percentile joins only sessions where BOTH legs exist. VIX starts 1990 and VIX3M
+        # 2009; an unaligned join would score today against days VIX3M never had.
+        v3map = dict(series["VIX3M"])
+        hist = [c / v3map[d] for d, c in series["VIX"] if d in v3map and v3map[d]]
+        window = hist[-CBOE_LOOKBACK:]
+        if window:
+            out["vix_vix3m_pct"] = round(
+                100.0 * sum(1 for x in window if x <= ratio) / len(window), 1)
+            out["backwardation_share_pct"] = round(
+                100.0 * sum(1 for x in window if x >= 1.0) / len(window), 1)
+            out["lookback_sessions"] = len(window)
+    return out
+
+
 def _compare_sources(primary: dict, fallback: dict, tol: float) -> dict:
     """Agreement check between two {key: last} maps over their overlapping keys."""
     rows, all_match = {}, True
@@ -584,9 +690,54 @@ def macro_pulse(today: dt.date | None = None) -> dict:
             d["label"] = lbl
             d["source"] = "yfinance(daily)"
         out[t] = d
-    ts = _vol_term_structure(out.get("^VIX") or {}, out.get("^VIX9D") or {})
-    if ts:
+
+    # The term structure comes from Cboe's OWN closes when they are available: all legs are
+    # from one publisher and one session, so the VIX9D-vs-VIX alignment problem below cannot
+    # arise. The CNBC/Yahoo legs stay because Cboe publishes after the close and this brief is
+    # pre-open — they carry the live move, which Cboe cannot.
+    official = cboe_vol_official()
+    if official:
+        out["vol_official"] = official
+    live_ts = _vol_term_structure(out.get("^VIX") or {}, out.get("^VIX9D") or {})
+
+    if official and official.get("aligned") and official.get("spread_9d_minus_30d") is not None:
+        vix_live = (out.get("^VIX") or {}).get("last")
+        vix_close = official["levels"]["VIX"]["last"]
+        ts = {
+            "source": official["source"],
+            "as_of": official["as_of"],
+            "aligned": True,
+            "vix": vix_close,
+            "vix9d": official["levels"]["VIX9D"]["last"],
+            "vix_date": official["as_of"],
+            "vix9d_date": official["levels"]["VIX9D"]["date"],
+            "mixed_dates": False,
+            "spread_9d_minus_30d": official["spread_9d_minus_30d"],
+            "state": ("BACKWARDATION (9d > 30d — acute near-term fear)"
+                      if official["spread_9d_minus_30d"] > 0
+                      else "CONTANGO (9d < 30d — normal/calm near-term)"),
+            "vix3m": official.get("levels", {}).get("VIX3M", {}).get("last"),
+            "vix6m": official.get("levels", {}).get("VIX6M", {}).get("last"),
+            "vix_vix3m": official.get("vix_vix3m"),
+            "vix_vix3m_pct": official.get("vix_vix3m_pct"),
+            "backwardation_share_pct": official.get("backwardation_share_pct"),
+            "lookback_sessions": official.get("lookback_sessions"),
+        }
+        if vix_live is not None and vix_live != vix_close:
+            ts["vix_live"] = vix_live
+            ts["vix_live_chg"] = (out.get("^VIX") or {}).get("chg")
+            ts["note"] = (f"Term structure is Cboe's OFFICIAL {official['as_of']} close, all "
+                          f"legs same session. VIX has since traded to {vix_live} live "
+                          f"(CNBC/Yahoo) — quote that as the live move, not as a curve leg.")
+        # Kept for transparency: if the relayed feed disagrees with the issuer, that is worth
+        # seeing rather than silently discarding.
+        if live_ts:
+            ts["relayed_reading"] = live_ts
         out["term_structure"] = ts
+    elif live_ts:
+        # Cboe unreachable or legs unaligned — fall back to the reconstructed CNBC reading.
+        live_ts["source"] = "CNBC/Yahoo (relayed) — Cboe official unavailable"
+        out["term_structure"] = live_ts
     return out
 
 
@@ -1055,11 +1206,33 @@ def render_md(d: dict) -> str:
         if "error" not in v:
             L.append(f"- {v.get('label')} ({t}): {v.get('last')}  chg {v.get('chg')}  "
                      f"[{v.get('last_date')}] ({v.get('source', '?')})")
+    off = mp.get("vol_official")
+    if off:
+        lv = off.get("levels", {})
+        curve = "  ".join(f"{s} {lv[s]['last']}" for s in CBOE_INDICES if s in lv)
+        L.append(f"- VOL CURVE (Cboe OFFICIAL close [{off.get('as_of')}], "
+                 f"{'all legs same session' if off.get('aligned') else '⚠️ MIXED SESSIONS'}): "
+                 f"{curve}")
+        if off.get("vix_vix3m") is not None:
+            pct = off.get("vix_vix3m_pct")
+            ctx = (f" — percentile {pct} of the last {off.get('lookback_sessions')} sessions"
+                   if pct is not None else "")
+            L.append(f"    VIX/VIX3M {off['vix_vix3m']} -> {off['state']}{ctx}. "
+                     f"Backwardation occurs in {off.get('backwardation_share_pct')}% of them.")
+            L.append("    (percentile is CONTEXT for the regime read — not a gate, not a signal)")
+        if off.get("missing"):
+            L.append(f"    ⚠️ legs unavailable: {', '.join(off['missing'])}")
+
     ts = mp.get("term_structure")
     if ts and not ts.get("mixed_dates"):
-        L.append(f"- TERM STRUCTURE [both legs {ts.get('as_of')}, same-moment]: "
+        src = ts.get("source", "")
+        L.append(f"- TERM STRUCTURE [both legs {ts.get('as_of')}, same-moment"
+                 f"{'; ' + src if src else ''}]: "
                  f"VIX9D {ts['vix9d']} vs VIX {ts['vix']} "
                  f"(spread {ts['spread_9d_minus_30d']}) -> {ts['state']}")
+        if ts.get("vix_live") is not None:
+            L.append(f"    VIX has since traded to {ts['vix_live']} live — that is the intraday "
+                     f"move, NOT a curve leg. The curve above is the official close.")
     elif ts and ts.get("aligned"):
         L.append(f"- TERM STRUCTURE ⚠️ legs are from DIFFERENT sessions — VIX9D only "
                  f"recomputes in RTH, so it is the {ts['vix9d_date']} close while VIX is "

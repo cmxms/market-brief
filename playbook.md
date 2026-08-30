@@ -56,30 +56,11 @@ calls: it informs the reader's own regime call.
 
 3. **Write the brief** to the 6-section template below.
 
-3b. **Write the CARD block** — the TL;DR image's input. At the very bottom of the brief md,
-   after the disclaimer, add:
-   ```
-   <!-- CARD
-   Lead phrase | the supporting clause, one sentence
-   ... 3 or 4 of these, most important first ...
-   Gate: what's actually on the calendar today
-   -->
-   ```
-   Rules for it:
-   - **3 or 4 points, never more** — it's the thing someone reads instead of scrolling.
-   - The lead is 2–5 words and states a *conclusion*, not a topic ("Oil did all the work",
-     not "Oil"). The clause carries the number that proves it.
-   - **Points are the writer's judgement — this is the one part no script can produce.**
-     Nothing generates them; if the block is missing, the card falls back to the first bullet
-     of each section, which is always visibly worse.
-   - `Gate:` overrides the footer. Write it yourself whenever the day has something the event
-     gate can't see (ISM, Fed speakers, one-offs). **The gate's `today_is_t1: False` still
-     only means "not a prop-firm restricted day"** — a card that reads "nothing today" on an
-     ISM morning is the 7/30 mistake published as a graphic.
-   - Every number in it must already appear in the brief. No new claims on the card.
+   *(The TL;DR card was retired 2026-08-17 — the brief posts as text only. Don't write a
+   `<!-- CARD -->` block. `tldr_card.py` is still on disk, unused, if it's ever wanted back.)*
 
 4. **Output:** print the brief copy-paste-ready in the CLI, save it to
-   `briefs/{YYYY-MM-DD}.md`, render the TL;DR card and post both:
+   `briefs/{YYYY-MM-DD}.md`, and post it:
 
    ⚠️ **CHECK THE CLOCK AGAINST TODAY'S RELEASE TIMES BEFORE POSTING.** Writing the brief takes
    real time, and a scheduled print can land inside that gap — at which point the 🚨 Event gate
@@ -90,16 +71,32 @@ calls: it informs the reader's own regime call.
    8:15 ADP landed 6 min after a 7:54 pull and missed badly, +44k vs ~68k. Caught at 8:21 only
    because the clock was checked; the brief would otherwise have published "ADP 8:15 ET (~68k
    expected)" as a forward-looking line, with pre-ADP futures under it.)*
-   ```
-   .venv/Scripts/python.exe tldr_card.py briefs/{YYYY-MM-DD}.md          # preview the PNG
-   .venv/Scripts/python.exe tldr_card.py briefs/{YYYY-MM-DD}.md --post   # card, then brief
-   ```
-   The card's number strip (futures, VIX, 10Y, WTI, SPY gamma) is read from
-   `data/{date}.json` — the same block the brief was written from — so it can never disagree
-   with the text. **Look at the PNG before posting.**
 
-   Text-only, no card: `.venv/Scripts/python.exe post_discord.py briefs/{YYYY-MM-DD}.md`
-   (fans out to every webhook in `DISCORD_WEBHOOK_URL`; use `--dry` to preview the split).
+   🔑 **NEVER read the clock off the shell — there is no `date` invocation on this machine
+   that yields ET.** Local is CDT, `date -u` is UTC, and `TZ=America/New_York date` *ignores
+   the TZ* and prints UTC labelled `GMT`. ET comes from the block's `as_of_et`, from a
+   provider timestamp carrying an explicit `-0400`, or from:
+   ```
+   .venv/Scripts/python.exe -c "from datetime import datetime,timezone; from zoneinfo import ZoneInfo; print(datetime.now(timezone.utc).astimezone(ZoneInfo('America/New_York')))"
+   ```
+   *(2026-08-25: the shell said 12:42 PM ET at 8:44 AM ET. I read this very check against it,
+   concluded the 9:00/10:00 prints had landed, and re-ran `gather.py` on a block that was
+   never stale — with the correct `as_of_et` of 8:43 AM ET open on screen. Same root cause as
+   the naive-LOCAL archive-name bug fixed 2026-08-04.)*
+   ```
+   .venv/Scripts/python.exe post_discord.py briefs/{YYYY-MM-DD}.md --dry   # preview the split
+   .venv/Scripts/python.exe post_discord.py briefs/{YYYY-MM-DD}.md         # post
+   ```
+   Fans out to every webhook in `DISCORD_WEBHOOK_URL`, splitting on `## ` boundaries.
+   **Read the `--dry` output before posting.**
+
+   `post_discord.py` now runs this check itself (`stale_check`, tests in
+   `tests/test_stale_check.py`): it parses the brief's own stamp, compares it to tz-aware ET
+   now, and prints a **⚠ STALE BLOCK CHECK** naming any release times inside the gap, then
+   posts anyway after 5s. It **warns, never blocks** — and it can only see T1/tier2 from the
+   YAML, so one-offs (ISM, Conf Board, Case-Shiller, Fed speakers) still ride on your step-2
+   sweep; it flags the standard release *windows* as candidates for exactly that reason.
+   `--stale-ok` skips it.
 
 ## Hard rules (non-negotiable)
 
@@ -110,13 +107,22 @@ calls: it informs the reader's own regime call.
   say so — never present a stale yield as live.
 - **VIX term structure — quote `spread_9d_minus_30d` and `state` from the block, and
   never subtract the two VIX numbers yourself.** VIX publishes through the pre-open but
-  **VIX9D only recomputes in RTH**, so pre-open the two legs are usually from *different
-  sessions* (17 of 20 July runs). The block now detects that and reports the spread at
-  the last close both legs shared — a real same-moment reading — and prints the raw
-  live-minus-stale figure only to tell you not to use it. If you see `⚠️ legs are from
-  DIFFERENT sessions`, say the term structure is **as of that prior close** and quote
-  today's VIX move separately. *(This is not hypothetical: on 2026-07-30 the naive
+  **VIX9D only recomputes in RTH**, so on a relayed feed the two legs are usually from
+  *different sessions* (17 of 20 July runs). *(Not hypothetical: on 2026-07-30 the naive
   subtraction read BACKWARDATION / "acute near-term fear"; aligned, it was CONTANGO.)*
+  - **Prefer the `VOL CURVE (Cboe OFFICIAL close)` line when it is present.** That is the
+    exchange's own settled number — CNBC and Yahoo both redistribute it — and all four
+    legs come from the same session by construction, so the alignment problem cannot
+    arise. It carries VIX3M and VIX6M too, which the relayed feed does not.
+  - 🔴 **It is the OFFICIAL CLOSE, not a live number.** Cboe publishes after the close, so
+    pre-open it is the *prior* session. If the block adds "VIX has since traded to X live",
+    that X is the intraday move — quote it as the move, never as a leg of the curve.
+  - **`VIX/VIX3M` with its percentile is the regime read.** Say how unusual it is, not just
+    which side of 1.0 it sits on ("contango, steeper than 97% of the last two years" beats
+    "contango"). The percentile is CONTEXT — never write it as a signal or a trigger.
+  - If you see `⚠️ legs are from DIFFERENT sessions` (Cboe unreachable, relayed fallback in
+    use), say the term structure is **as of that prior close** and quote today's VIX move
+    separately.
 - **Source cross-check (REQUIRED gate):** the block has a "Source cross-check (CNBC vs
   Yahoo)" section. ✓ all match = confirmed. ⚠️ MISMATCH = **do NOT publish that number**
   until you've verified which source is right. "Only one source" = degraded but usable.
