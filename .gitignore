@@ -5,3 +5,4 @@ __pycache__/
 data/
 _harvest/
 # briefs/ is intentionally committed — it's the shareable archive of past briefs.
+logs/
