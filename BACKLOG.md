@@ -2,6 +2,11 @@
 
 Next-session to-do. Newest intent at top; check off / retire with a trail.
 
+Which list to use (2026-11-14): this file is **project-level engineering detail**
+for market-brief. The workspace list `CMXMS/WORKLIST.md` is the one the user
+reads, and anything that needs their attention or decision goes there. Do not
+let the same open item live in both.
+
 Scope note (2026-08-01): this repo does two things — **gather the numbers and write the
 brief**, then **post it to Discord**. The Brief Live dashboard was split out to
 `CMTMS/brief-live/`; its backlog went with it. Don't add board work here.
