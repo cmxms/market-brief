@@ -1,0 +1,33 @@
+# NYSE full-day market closures.
+#
+# Source: https://www.nyse.com/markets/hours-calendars — retrieved 2026-11-14.
+# The exchange publishes three years ahead; refresh this file annually.
+#
+# Early closes (1:00 pm ET) are listed separately and do not stop the brief.
+
+holidays:
+  "2026-01-01": New Year's Day
+  "2026-01-19": Martin Luther King, Jr. Day
+  "2026-02-16": Washington's Birthday
+  "2026-04-03": Good Friday
+  "2026-05-25": Memorial Day
+  "2026-06-19": Juneteenth National Independence Day
+  "2026-07-03": Independence Day (observed)
+  "2026-09-07": Labor Day
+  "2026-11-26": Thanksgiving Day
+  "2026-12-25": Christmas Day
+  "2027-01-01": New Year's Day
+  "2027-01-18": Martin Luther King, Jr. Day
+  "2027-02-15": Washington's Birthday
+  "2027-03-26": Good Friday
+  "2027-05-31": Memorial Day
+  "2027-06-18": Juneteenth National Independence Day (observed)
+  "2027-07-05": Independence Day (observed)
+  "2027-09-06": Labor Day
+  "2027-11-25": Thanksgiving Day
+  "2027-12-24": Christmas Day (observed)
+
+early_closes:
+  "2026-11-27": "13:00 ET"
+  "2026-12-24": "13:00 ET"
+  "2027-11-26": "13:00 ET"
