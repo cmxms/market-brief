@@ -15,7 +15,9 @@ Creds (env / .env, or GitHub Actions secret):
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -114,7 +116,10 @@ def _send(webhook: str, content: str) -> None:
     """POST one message; retry on Discord's 429 rate-limit. allowed_mentions is locked
     to [] so nothing in the brief text can ever trigger an @everyone/@here/role ping."""
     for _ in range(4):
-        r = requests.post(webhook, json={"content": content, "allowed_mentions": {"parse": []}}, timeout=20)
+        try:
+            r = requests.post(webhook, json={"content": content, "allowed_mentions": {"parse": []}}, timeout=20)
+        except requests.RequestException as exc:
+            raise RuntimeError(sanitize(str(exc))) from None
         if r.status_code == 429:
             wait = 2.0
             try:
@@ -123,15 +128,31 @@ def _send(webhook: str, content: str) -> None:
                 pass
             time.sleep(wait + 0.5)
             continue
-        r.raise_for_status()
+        if r.status_code >= 400:
+            raise RuntimeError(f"Discord webhook HTTP {r.status_code} ({fingerprint(webhook)})")
         return
     raise RuntimeError("Discord webhook failed after retries (429)")
 
 
-def _redact(url: str) -> str:
-    """A Discord webhook URL ends in /webhooks/<id>/<TOKEN> — never log the token."""
-    parts = url.rstrip("/").split("/")
-    return "/".join(parts[:-1] + ["****"]) if len(parts) >= 2 else "****"
+_WEBHOOK_URL = re.compile(
+    r"(?:https?://(?:(?:ptb|canary)\.)?discord(?:app)?\.com)?"
+    r"/api/(?:v\d+/)?webhooks/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+"
+    r"(?:[/?][^\s\"'<>\\)]*)?",
+    re.IGNORECASE,
+)
+# Webhook tokens are long URL-safe strings. Err on the side of redacting other
+# long identifiers too: bare tokens in exception reprs must not survive.
+_BARE_TOKEN = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{60,}(?![A-Za-z0-9_-])")
+
+
+def sanitize(text: str) -> str:
+    """Remove webhook URLs, request paths and bare token-shaped strings from text."""
+    return _BARE_TOKEN.sub("[REDACTED]", _WEBHOOK_URL.sub("[REDACTED]", text))
+
+
+def fingerprint(webhook: str) -> str:
+    """Stable destination identity without retaining any part of its credential."""
+    return hashlib.sha256(webhook.encode("utf-8")).hexdigest()
 
 
 def _webhooks_from_env() -> list[str]:
@@ -165,12 +186,15 @@ def _send_file(webhook: str, path: Path, content: str = "") -> None:
     payload = {"content": content, "allowed_mentions": {"parse": []}}
     for _ in range(4):
         with path.open("rb") as fh:
-            r = requests.post(
-                webhook,
-                data={"payload_json": __import__("json").dumps(payload)},
-                files={"file": (path.name, fh, "image/png")},
-                timeout=45,
-            )
+            try:
+                r = requests.post(
+                    webhook,
+                    data={"payload_json": __import__("json").dumps(payload)},
+                    files={"file": (path.name, fh, "image/png")},
+                    timeout=45,
+                )
+            except requests.RequestException as exc:
+                raise RuntimeError(sanitize(str(exc))) from None
         if r.status_code == 429:
             wait = 2.0
             try:
@@ -179,7 +203,8 @@ def _send_file(webhook: str, path: Path, content: str = "") -> None:
                 pass
             time.sleep(wait + 0.5)
             continue
-        r.raise_for_status()
+        if r.status_code >= 400:
+            raise RuntimeError(f"Discord image upload HTTP {r.status_code} ({fingerprint(webhook)})")
         return
     raise RuntimeError("Discord image upload failed after retries (429)")
 
@@ -198,7 +223,7 @@ def post_image(path: str | Path, webhook: str | list[str] | None = None, content
             ok.append(w)
         except Exception as e:
             failed.append(w)
-            print(f"  WARN Discord image upload failed ({_redact(w)}): {e}", flush=True)
+            print(f"  WARN Discord image upload failed ({fingerprint(w)}): {sanitize(str(e))}", flush=True)
     if not ok:
         raise RuntimeError(f"all {len(webhooks)} Discord webhook(s) failed on image upload")
     return f"posted image to {len(ok)}/{len(webhooks)} webhook(s)" + (f" — {len(failed)} FAILED" if failed else "")
@@ -235,7 +260,7 @@ def post(brief_md: str, webhook: str | list[str] | None = None) -> str:
             ok.append(w)
         except Exception as e:
             failed.append(w)
-            print(f"  WARN Discord webhook failed ({_redact(w)}): {e}", flush=True)
+            print(f"  WARN Discord webhook failed ({fingerprint(w)}): {sanitize(str(e))}", flush=True)
     if not ok:
         raise RuntimeError(f"all {len(webhooks)} Discord webhook(s) failed")
     summary = f"posted {len(msgs)} message(s) to {len(ok)}/{len(webhooks)} Discord webhook(s)"
