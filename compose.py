@@ -1,12 +1,15 @@
 """Narrative generation.
 
-Hermes runs headless with the `web` and `file` toolsets only. It has no terminal,
-so it cannot execute anything, and it is never given the Discord configuration:
-posting is a separate process that runs after validation.
+Hermes runs headless with the `web` and `file` toolsets only, so it has no
+terminal and cannot execute anything. It is also launched with a filtered
+environment: every key declared in the runtime `config/.env`, and anything
+matching `DISCORD_WEBHOOK*`, is removed before the child starts. Posting is a
+separate process that runs after validation.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -78,16 +81,28 @@ def run(date: str, data_md: Path, out: Path, log_path: Path) -> tuple[bool, str]
         "--run-budget", str(model_cfg.get("run_budget_seconds", 900)),
     ]
 
+    # Preserve launcher/OS variables and unrelated settings, but never runtime
+    # config secrets. Compare case-insensitively for Windows environment names.
+    excluded = {key.upper() for key in config.env_keys()}
+    child_env = {key: value for key, value in os.environ.items()
+                 if key.upper() not in excluded
+                 and not key.upper().startswith("DISCORD_WEBHOOK")}
+
     started = time.time()
     with log_path.open("a", encoding="utf-8", errors="replace") as log:
         log.write(f"\n=== compose start {date} ===\n")
+        log.write("compose environment: filtered (runtime config keys and DISCORD_WEBHOOK* excluded)\n")
         log.write(" ".join(cmd) + "\n")
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+            proc = subprocess.run(cmd, env=child_env, capture_output=True, text=True, encoding="utf-8",
                                   errors="replace", timeout=int(model_cfg.get("run_budget_seconds", 900)) + 120)
         except subprocess.TimeoutExpired:
             log.write("compose timed out\n")
             return False, "compose timed out"
+        except OSError as exc:
+            detail = f"compose launch failed with filtered environment ({type(exc).__name__}, errno {exc.errno})"
+            log.write(detail + "\n")
+            return False, detail
         log.write(proc.stdout or "")
         if proc.stderr:
             log.write("\n--- stderr ---\n" + proc.stderr)

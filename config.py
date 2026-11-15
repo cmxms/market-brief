@@ -27,6 +27,7 @@ CONFIG = RUNTIME / "config"
 BRIEFS = PROJECT / "briefs"
 SETTINGS_PATH = CONFIG / "settings.toml"
 ENV_PATH = CONFIG / ".env"
+_ENV_KEYS: set[str] = set()
 
 
 def ensure_dirs() -> None:
@@ -50,7 +51,15 @@ def load_env() -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        key = key.strip()
+        # Track declarations even when a real environment variable takes precedence.
+        _ENV_KEYS.add(key)
+        os.environ.setdefault(key, value.strip().strip('"').strip("'"))
+
+
+def env_keys() -> frozenset[str]:
+    """Keys declared by runtime env files loaded in this process (no values)."""
+    return frozenset(_ENV_KEYS)
 
 
 def hermes_bin() -> str:
