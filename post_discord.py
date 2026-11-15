@@ -304,15 +304,30 @@ def _parse_stamp(brief_md: str):
 
 def _calendar_events_today(day) -> list[tuple[str, str]]:
     """(time_et, name) for T1 + tier2 events on `day`, from that date's gather JSON.
-    Empty on any failure — this is a warning path and must never break a post."""
+    Empty on any failure — this is a warning path and must never break a post.
+
+    The data block lives in the configured runtime root, not beside this script. It
+    used to sit in `./data/`, so moving operational files out of the repository
+    silently disabled this check: the file was missing, the exception was swallowed,
+    and the warning simply never fired. Falls back to the old in-project path so a
+    legacy checkout still works.
+    """
     import json
+    candidates = []
     try:
-        p = Path(__file__).resolve().parent / "data" / f"{day.isoformat()}.json"
-        eg = json.loads(p.read_text(encoding="utf-8")).get("event_gate", {})
+        import config
+        candidates.append(config.DATA / f"{day.isoformat()}.json")
+    except Exception:
+        pass
+    candidates.append(Path(__file__).resolve().parent / "data" / f"{day.isoformat()}.json")
+    for p in candidates:
+        try:
+            eg = json.loads(p.read_text(encoding="utf-8")).get("event_gate", {})
+        except Exception:
+            continue
         return [(e.get("time_et", "??:??"), e.get("name", "?"))
                 for e in (eg.get("today_events") or []) + (eg.get("today_tier2") or [])]
-    except Exception:
-        return []
+    return []
 
 
 def stale_check(brief_md: str) -> bool:
