@@ -36,11 +36,13 @@ def already_delivered(date: str, target: str) -> bool:
 
 
 def _record(date: str, target: str, status: str, detail: str, chunks: int = 0) -> None:
+    from post_discord import sanitize
+
     LEDGER.parent.mkdir(parents=True, exist_ok=True)
     with LEDGER.open("a", encoding="utf-8") as f:
         f.write(json.dumps({
             "date": date, "target": target, "status": status,
-            "detail": detail, "chunks": chunks, "at": _now(),
+            "detail": sanitize(detail), "chunks": chunks, "at": _now(),
         }) + "\n")
 
 
@@ -50,17 +52,36 @@ def _chunks(md: str) -> list[str]:
 
 
 def deliver_production(md: str, date: str, force: bool = False) -> tuple[bool, str]:
-    if already_delivered(date, "production") and not force:
-        return True, "already delivered to production (ledger)"
     import post_discord
-    parts = _chunks(md)
+
     try:
-        summary = post_discord.post(md)
+        webhooks = post_discord._resolve(None)
     except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-        _record(date, "production", "failed", repr(exc), len(parts))
-        return False, f"production delivery failed: {exc}"
-    _record(date, "production", "ok", summary, len(parts))
-    return True, summary
+        _record(date, "production", "failed", repr(exc))
+        return False, f"production delivery failed: {post_discord.sanitize(str(exc))}"
+
+    parts = _chunks(md)
+    failed: list[str] = []
+    sent = 0
+    for webhook in webhooks:
+        target = "production:" + post_discord.fingerprint(webhook)
+        # Legacy aggregate production rows cannot establish which destination
+        # succeeded; only destination-specific rows suppress a send.
+        if not force and already_delivered(date, target):
+            continue
+        try:
+            summary = post_discord.post(md, webhook=webhook)
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            _record(date, target, "failed", repr(exc), len(parts))
+            failed.append(target)
+        else:
+            _record(date, target, "ok", summary, len(parts))
+            sent += 1
+    if failed:
+        return False, "production delivery failed; outstanding destinations: " + ", ".join(failed)
+    if not sent:
+        return True, "already delivered to production (ledger)"
+    return True, f"posted {len(parts)} message(s) to {sent} production destination(s)"
 
 
 def deliver_test(md: str, date: str, channel_id: str, force: bool = False) -> tuple[bool, str]:
@@ -81,7 +102,10 @@ def deliver_test(md: str, date: str, channel_id: str, force: bool = False) -> tu
         finally:
             tmp_path.unlink(missing_ok=True)
         if proc.returncode != 0:
-            _record(date, "test", "failed", f"chunk {i}/{len(parts)}: {proc.stderr.strip()[:300]}", sent)
+            from post_discord import sanitize
+
+            reason = sanitize(proc.stderr.strip())[:300]
+            _record(date, "test", "failed", f"chunk {i}/{len(parts)}: {reason}", sent)
             return False, f"test delivery failed on chunk {i}/{len(parts)}"
         sent += 1
     _record(date, "test", "ok", f"sent {sent} chunk(s) to test channel", sent)

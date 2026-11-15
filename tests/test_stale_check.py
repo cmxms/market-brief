@@ -100,4 +100,5 @@ except Exception as e:  # pragma: no cover
     check("degraded inputs return quietly instead of raising", False, f"raised {e!r}")
 
 print(f"\n{_passed}/{_passed + _failed} passed")
-sys.exit(1 if _failed else 0)
+if __name__ == "__main__":
+    sys.exit(1 if _failed else 0)

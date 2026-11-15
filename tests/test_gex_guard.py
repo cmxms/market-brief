@@ -86,4 +86,5 @@ print(f"\n{5 - len(failures)}/5 passed")
 if failures:
     for f in failures:
         print(f"  FAILED: {f}")
-    sys.exit(1)
+    if __name__ == "__main__":
+        sys.exit(1)
