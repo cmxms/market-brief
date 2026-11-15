@@ -102,6 +102,13 @@ calls: it informs the reader's own regime call.
 
 - **Never invent a number.** Every price/level/yield comes from the gather block or a
   cited source. If you didn't fetch it, don't state it.
+- **Two-source rule for hard specifics.** Casualty or incident counts, executive names
+  and titles, deal sizes, and any figure not in the data block need either two
+  independent sources that agree, or the primary source (the exchange, the company,
+  the government). If two sources disagree, write "reports differ" or omit the detail.
+  Never pick the more dramatic number, and never average them.
+  The claims ledger records what each such claim rested on; a claim you cannot source
+  belongs in neither the brief nor the ledger.
 - **Flag stale data.** The data block prints each yield's MODE (LIVE/EOD) + SOURCE +
   as-of + a ⚠️ STALE flag. Quote the LIVE number when present; if it shows EOD/STALE,
   say so — never present a stale yield as live.
@@ -147,11 +154,13 @@ calls: it informs the reader's own regime call.
   🚨 Event gate section entirely from the step-2 web sweep, and tell the user in the CLI
   so the file gets fixed. `⚠️ N calendar entries skipped as malformed` is the milder
   version: the calendar below it is usable, just treat it as possibly missing one event.
-- **`🔴 CHAIN INCOMPLETE` in the GEX section = do NOT write a regime call.** It means option
-  **open interest** went missing from the chain, so GEX is understated — and an understated
-  GEX *looks exactly like* a shift to negative gamma. Write the 🧭 Regime read from vol and
-  price action instead, say the gamma read is unavailable today in one short clause, and
-  **tell the user in the CLI, not in the brief** (this is a process note).
+- **`🔴 GAMMA READ UNAVAILABLE` or `🔴 CHAIN INCOMPLETE` in the GEX section = do NOT write a
+  regime call.** The first means an expiration request returned no chain at all, so the
+  totals are missing a whole slice of the book; the second means option **open interest**
+  went missing from the chain. Both understate GEX — and an understated GEX *looks exactly
+  like* a shift to negative gamma. Write the 🧭 Regime read from vol and price action
+  instead, say the gamma read is unavailable today in one short clause, and **tell the user
+  in the CLI, not in the brief** (this is a process note).
   🔑 **Trust this line — but only this line.** Do NOT talk yourself into suppressing the
   gamma read off a raw dropped-contract count you spot in the JSON. Newly-listed strikes
   come back with no greeks and zero OI, contribute exactly zero GEX, and routinely push
@@ -246,3 +255,6 @@ a header — put emphasis in the body.
   (options don't trade overnight) — label it as such if quoting pre-open.
 - Finnhub free tier: news lag ~20-60min — fine for a daily look-back, not intraday.
 - Refresh `t1_calendar.yaml` quarterly from the Fed + BLS calendars.
+
+## User publishing preference (standing rule)
+Do not include source links, citations, or a source list in the Discord brief. Continue researching and verifying sources privately; retain source details in local data or notes only. This applies to every future market brief unless the user explicitly changes it.
