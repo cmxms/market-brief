@@ -25,6 +25,13 @@ version numbers; entries are dated.
 - GEX coverage reporting: expirations requested and failed, contracts, open
   interest used, and the share of open interest the flip repriced.
 - `AGENTS.md`: the project's operating contract for agents.
+- Delivery ledger records each destination separately, keyed by a SHA-256
+  fingerprint of its webhook URL. A retry after a partial failure re-sends only
+  the destinations still missing.
+- `post_discord.sanitize()` scrubs webhook URLs, request paths and bare
+  token-shaped strings from any text before it is logged or recorded.
+- `tests/test_delivery.py` and `tests/test_compose_env.py`: first tests covering
+  the delivery path and the compose environment.
 
 ### Changed
 
@@ -37,6 +44,11 @@ version numbers; entries are dated.
   two edits.
 - The playbook gained a two-source rule for hard specifics (counts, names, deal
   sizes) and now names `GAMMA READ UNAVAILABLE` alongside `CHAIN INCOMPLETE`.
+- The compose subprocess no longer inherits the parent environment. Keys declared
+  in the runtime `config/.env` — webhooks, Finnhub, FRED, Tradier — and anything
+  matching `DISCORD_WEBHOOK*` are removed before launch. `config.env_keys()`
+  reports which keys came from that file, so the filter cannot go stale when a new
+  secret is added.
 
 ### Fixed
 
@@ -52,6 +64,18 @@ version numbers; entries are dated.
   reads the runtime location and falls back to the legacy path.
 - Spot source (`last` or `close`) and its timestamp are recorded instead of
   discarded.
+- A webhook failure could write a working token to the log: only the interpolated
+  URL was redacted, while `{e}` carried requests' `HTTPError` text containing the
+  full token-bearing URL. Failure text is now sanitized everywhere it can reach a
+  log or the ledger, and non-2xx responses raise a status code plus fingerprint
+  instead of `raise_for_status()`.
+- Partial delivery was recorded as complete: with two webhooks, one success and one
+  failure wrote `status: ok`, exited 0, and the retry skipped the failed
+  destination while `--force` duplicated the successful one. Now any outstanding
+  destination returns failure (exit 7).
+- `pytest` could not run at all — three script-style test files called `sys.exit()`
+  at import, aborting collection with `INTERNALERROR`. Guarded behind `__main__`;
+  the suite now collects and passes.
 
 ### Known gaps
 
@@ -59,3 +83,12 @@ version numbers; entries are dated.
   unknown rather than estimated.
 - Open interest is end-of-day, so walls describe the prior session's positioning.
 - The dealer side of each contract is inferred by convention, never reported.
+- A failure part-way through a single destination's chunk sequence re-sends that
+  whole destination on retry, so its earlier chunks can appear twice. The ledger
+  tracks destinations, not individual messages.
+- The sanitizer redacts any 60+ character token-shaped string, so a long
+  identifier in a ledger detail can be over-redacted. Erring toward redaction is
+  deliberate.
+- The compose `file` tool's readable-path boundary has not been probed. The
+  environment filter is verified; what the file tool can reach is not.
+- Holiday coverage stops at 2027. Extend `market_holidays.yaml` before then.

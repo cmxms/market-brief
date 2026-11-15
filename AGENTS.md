@@ -18,8 +18,10 @@ This file is only the operating contract around it.
 ## Rules
 
 - **The compose step never posts.** It runs with the `web` and `file` toolsets
-  only, so it has no terminal and no delivery credentials. Posting is a separate
-  process that runs after validation.
+  only, so it has no terminal. It is also given a deliberately filtered
+  environment: every key declared in `runtime/market-brief/config/.env`, and
+  anything matching `DISCORD_WEBHOOK*`, is removed before the child process
+  starts. Posting is a separate process that runs after validation.
 - **Never invent a number.** Every figure comes from the data block or a page the
   agent fetched itself.
 - **No links, citations or source lists in the brief.** Verify sources privately;
@@ -46,5 +48,8 @@ Nothing resolves paths from the working directory.
 Exit codes: 0 ok, 2 weekend, 3 gather, 4 compose, 5 validation, 6 outside window,
 7 delivery, 8 spend estimate.
 
-Known gap: US market holidays are not detected yet. Do not run this unattended on
-a holiday until a verified calendar is in place.
+Market holidays are detected from `market_holidays.yaml` (NYSE closures for 2026
+and 2027): a listed holiday exits 2 without posting, and an early close is logged.
+If that file is ever missing, the run warns and continues rather than failing
+closed, so the calendar's presence is worth confirming after any environment
+change.

@@ -11,9 +11,11 @@ Exit codes are meaningful so Task Scheduler and a human both see the real outcom
     7  delivery failed
     8  monthly spend estimate reached
 
-Known gap: US market holidays are not detected here. The previous pipeline asked
-the model to decide; that is not reproducible, so a verified holiday calendar is
-still to be added before this runs unattended on a holiday.
+NYSE holidays are detected from `market_holidays.yaml` (2026-2027 closures and
+early closes): a listed holiday exits 2 without posting, an early close is logged.
+If the calendar file is missing the run warns and continues, so confirm the file
+is present after any environment change. Coverage stops at 2027; extend the file
+before then.
 """
 
 from __future__ import annotations
