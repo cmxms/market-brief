@@ -35,6 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
+import numpy as np
 import pandas as pd
 import yaml
 import yfinance as yf
@@ -97,6 +98,8 @@ OIL = ("CL=F", "WTI crude")
 # GEX: dealer gamma for the two most-hedged index proxies.
 GEX_SYMBOLS = ("SPY", "QQQ")
 GEX_NEAR_EXPIRATIONS = 4   # nearest N expirations for the intraday regime read (matches the recorded baseline)
+GEX_FLIP_SCAN_PCT = 0.10   # zero-gamma search window: re-price total GEX over spot ±10%
+GEX_FLIP_GRID = 801        # grid points across that window (~0.025% of spot apart)
 # A contract with no gamma or no open interest can't be used and gets skipped. That is
 # normally fine — but if Tradier's greeks degrade, GEX shrinks toward zero and every field
 # still looks plausible, which is what a real regime flip looks like. So: measure the skips
@@ -108,6 +111,10 @@ GEX_NEAR_EXPIRATIONS = 4   # nearest N expirations for the intraday regime read 
 # GEX, and pushed the count to 5.42% on 2026-08-06 while the OI measure sat at 0.0%. Gating
 # on the count cost three straight mornings of gamma reads (08-04, 08-05, 08-06).
 GEX_DROP_WARN_PCT = 2.0
+#: The flip is only reported when the re-priced contracts carry at least this share of
+#: the usable open interest. Below it the profile is describing a different book than
+#: the total, and a flip drawn from a minority of the OI is worse than no flip.
+GEX_FLIP_MIN_OI_SHARE = 0.98
 
 # Treasury yields: source from the US Treasury's own Daily Par Yield Curve (the
 # authoritative source — these ARE the constant-maturity rates FRED republishes a
@@ -174,6 +181,55 @@ def _close_series(h: pd.DataFrame) -> pd.Series:
     return c.dropna()
 
 
+# A continuous-contract move that is really a contract change. yfinance's ES=F/NQ=F
+# swap front contracts silently: on 2026-09-15 the daily bar's prev_close was the
+# September settle and its last was December, so ES printed +0.73% / NQ +0.9% on
+# a session where the same contract moved -0.12% / -0.07%. Sep->Dec carry at 5%
+# rates is ~1% -- an order of magnitude above a normal 16:00->17:00 settle drift,
+# so a 0.4% disagreement between the two prior closes is unambiguous.
+ROLL_TOL_PCT = 0.4
+
+
+def _intraday_prior_close(ticker: str) -> tuple[float | None, float | None]:
+    """(prior session's <=16:00 ET close, latest 1m close) from the 1-minute series,
+    which yfinance serves from ONE contract across the window. (None, None) on failure."""
+    try:
+        h = yf.download(ticker, period="5d", interval="1m", progress=False, auto_adjust=False)
+        if h.empty:
+            return None, None
+        idx = h.index
+        if getattr(idx, "tz", None) is None:
+            idx = idx.tz_localize("UTC")
+        h.index = idx.tz_convert("US/Eastern")
+        c = _close_series(h)
+        dates = sorted(set(c.index.date))
+        for _d in reversed(dates[:-1]):
+            prior = c[(c.index.date == _d) & (c.index.time <= dt.time(16, 0))]
+            if len(prior):
+                return float(prior.iloc[-1]), float(c.iloc[-1])
+        return None, float(c.iloc[-1])
+    except Exception:
+        return None, None
+
+
+def roll_guard(last: float, prev_daily: float, prev_1m: float | None, last_1m: float | None,
+               tol_pct: float = ROLL_TOL_PCT) -> dict | None:
+    """Decide whether the daily close-to-close straddles a contract roll.
+
+    Returns None when the daily numbers stand, else {"prev_close": <same-contract prior
+    close>, "prev_close_daily": ..., "gap_pct": ...}. Requires the 1m series to be on the
+    same contract as today's daily bar (last vs last_1m agree within tol) -- otherwise
+    there is nothing trustworthy to substitute and the daily number is left alone."""
+    if prev_1m is None or last_1m is None or not prev_daily or not last:
+        return None
+    if abs(last_1m - last) / last * 100 > tol_pct:
+        return None
+    gap_pct = abs(prev_1m - prev_daily) / prev_daily * 100
+    if gap_pct <= tol_pct:
+        return None
+    return {"prev_close": prev_1m, "prev_close_daily": prev_daily, "gap_pct": round(gap_pct, 2)}
+
+
 def pull_daily(ticker: str) -> dict:
     """Daily close + 1-day change + recent + the latest day's range."""
     try:
@@ -185,7 +241,13 @@ def pull_daily(ticker: str) -> dict:
         hi = hi.iloc[:, 0] if hasattr(hi, "columns") else hi
         lo = lo.iloc[:, 0] if hasattr(lo, "columns") else lo
         last, prev = float(c.iloc[-1]), (float(c.iloc[-2]) if len(c) > 1 else None)
-        return {
+        roll = None
+        if prev and ticker.endswith("=F") and ticker in INDEX_FUTURES.values():
+            prev_1m, last_1m = _intraday_prior_close(ticker)
+            roll = roll_guard(last, prev, prev_1m, last_1m)
+            if roll:
+                prev = roll["prev_close"]
+        out = {
             "last": round(last, 3),
             "prev_close": round(prev, 3) if prev else None,
             "chg": round(last - prev, 3) if prev else None,
@@ -194,6 +256,10 @@ def pull_daily(ticker: str) -> dict:
             "last_range": [round(float(lo.iloc[-1]), 3), round(float(hi.iloc[-1]), 3)],
             "recent_closes": [round(float(x), 3) for x in c.iloc[-6:]],
         }
+        if roll:
+            out["roll_adjusted"] = {"prev_close_daily": round(roll["prev_close_daily"], 3),
+                                    "gap_pct": roll["gap_pct"]}
+        return out
     except Exception as e:
         return {"error": repr(e)}
 
@@ -815,48 +881,78 @@ def _chain(symbol: str, expiration: str):
     return [o] if isinstance(o, dict) else (o or [])
 
 
-def _chains_parallel(symbol: str, expirations, workers: int = 8) -> dict:
-    """Fetch every expiration's chain once, concurrently. {expiration: [options]}."""
+def _chains_parallel(symbol: str, expirations, workers: int = 8) -> tuple[dict, list]:
+    """Fetch every expiration's chain once, concurrently.
+
+    Returns `(chains, failed)`. A failed request is REPORTED, never replaced by an empty
+    list: "this expiration has no contracts" and "this request failed" are different
+    facts, and the second one silently understates GEX. An empty chain counts as a
+    failure too — a real listed expiration always has rows.
+    """
     out: dict[str, list] = {}
+    failed: list[str] = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {ex.submit(_chain, symbol, e): e for e in expirations}
         for fut, e in futs.items():
             try:
-                out[e] = fut.result()
+                rows = fut.result()
             except Exception:
-                out[e] = []
-    return out
+                failed.append(e)
+                continue
+            if rows:
+                out[e] = rows
+            else:
+                failed.append(e)
+    return out, failed
 
 
-def _zero_gamma_level(strike_totals: dict, significance_threshold_pct: float = 0.01):
-    """Zero-gamma (gamma-flip) level: the first per-strike net-gamma sign flip among
-    SIGNIFICANT strikes (deep-OTM noise below 1% of the peak is ignored), linearly
-    interpolated between the two bracketing strikes. This is the method the recorded
-    (Discount Bloomberg) GEX used — kept identical so the level stays continuous with
-    that history, and (unlike a cumulative-sum cross) it returns a real level in a
-    one-sided negative-gamma tape instead of None."""
-    if not strike_totals:
-        return None
-    max_abs = max(abs(v) for v in strike_totals.values())
-    if max_abs == 0.0:
-        return None
-    threshold = max_abs * significance_threshold_pct
-    significant = {k: v for k, v in strike_totals.items() if abs(v) >= threshold}
-    if len(significant) < 2:
-        return None
-    prev_strike, prev_net = None, 0.0
-    for k in sorted(significant):
-        net = significant[k]
-        if prev_strike is not None and ((prev_net < 0.0 <= net) or (prev_net > 0.0 >= net)):
-            if net == prev_net:
-                return k
-            ratio = max(0.0, min(1.0, -prev_net / (net - prev_net)))
-            return prev_strike + ratio * (k - prev_strike)
-        prev_strike, prev_net = k, net
-    return None
+def _zero_gamma_level(contracts, spot: float, now=None):
+    """Zero-gamma (gamma-flip) level: the hypothetical spot at which total dealer GEX
+    crosses zero, found by RE-PRICING every contract's gamma (Black-Scholes, r=q=0, its
+    own IV and time to expiry) across spot ±GEX_FLIP_SCAN_PCT. Returns
+    (flip, crossings): the crossing nearest spot, and every crossing in the window.
+
+    Why not the per-strike method this replaced. That took the FIRST sign change in the
+    net-gamma-by-strike table, scanning up from the lowest strike. Per-strike net gamma
+    flickers sign all through the put-heavy zone, so "first" was usually a noise strike
+    well below spot. 2026-09-29 QQQ: five per-strike sign changes between 690 and 765;
+    it reported 720.8 (a lone +77M strike amid negatives) with spot 736.5 and total gamma
+    NEGATIVE, a flip the regime itself contradicted. The re-priced profile has one
+    crossing, ~739.3, just above spot. SPY that morning had a single per-strike crossing
+    and the two methods agreed (765.8 vs 766.7), which is how the bug hid.
+
+    `contracts` is [(strike, sign, open_interest, iv, expiration 'YYYY-MM-DD')]. None
+    means no crossing inside the window (a genuinely one-sided tape), not an error."""
+    if not contracts or not spot:
+        return None, []
+    now = now if now is not None else pd.Timestamp.now(tz="America/New_York")
+    K, sign, oi, iv, t = [], [], [], [], []
+    for strike, sgn, o, v, exp in contracts:
+        close = pd.Timestamp(f"{exp} 16:00", tz="America/New_York")
+        # Floor at 15 minutes: a contract minutes from expiry still carries gamma, and a
+        # zero or negative T would divide by zero below.
+        years = max((close - now).total_seconds(), 900.0) / (365.0 * 86400.0)
+        K.append(strike); sign.append(sgn); oi.append(o); iv.append(v); t.append(years)
+    K, sign, oi = np.array(K), np.array(sign), np.array(oi)
+    sd = np.array(iv) * np.sqrt(np.array(t))
+    weight = sign * oi / (np.sqrt(2.0 * np.pi) * sd)
+    grid = np.linspace(spot * (1 - GEX_FLIP_SCAN_PCT), spot * (1 + GEX_FLIP_SCAN_PCT), GEX_FLIP_GRID)
+    profile = np.empty_like(grid)
+    for i in range(0, len(grid), 50):          # chunked: a full chain is ~25k contracts
+        s = grid[i:i + 50, None]
+        d1 = (np.log(s / K) + 0.5 * sd ** 2) / sd
+        # gamma = pdf(d1) / (S·σ√T); times S²·0.01·100 per contract = pdf(d1)·S / σ√T
+        profile[i:i + 50] = (np.exp(-0.5 * d1 ** 2) * weight).sum(axis=1) * s[:, 0]
+    idx = np.nonzero(np.sign(profile[:-1]) * np.sign(profile[1:]) < 0)[0]
+    crossings = [float(grid[i] + (grid[i + 1] - grid[i]) * profile[i] / (profile[i] - profile[i + 1]))
+                 for i in idx]
+    if not crossings:
+        return None, []
+    return min(crossings, key=lambda x: abs(x - spot)), crossings
 
 
-def _gex_from_options(options, spot: float) -> dict:
+def _gex_from_options(options, spot: float, now=None, *, spot_source=None, spot_time=None,
+                      expirations_requested=None, expirations_failed=None) -> dict:
     """Aggregate net dealer GEX by strike over a flat list of option rows.
 
     Contracts missing gamma or open interest are unusable and get skipped. We COUNT the
@@ -880,6 +976,7 @@ def _gex_from_options(options, spot: float) -> dict:
     sight. Never fold that into `dropped_oi` as a 0 — that reports an unknown as harmless.
     """
     by_strike: dict[float, float] = {}
+    profile_rows = []    # (strike, sign, oi, iv, expiration) for the re-priced flip
     call_total = put_total = 0.0
     n = n_dropped = n_oi_unknown = 0
     used_oi = dropped_oi = 0.0
@@ -901,6 +998,12 @@ def _gex_from_options(options, spot: float) -> dict:
             put_total += gex
         used_oi += float(oi)
         n += 1
+        # smv_vol is Tradier's smoothed surface; mid_iv is raw and junk on deep-ITM
+        # strikes (0.43 vs 0.26 on a 709 QQQ call, 2026-09-29), so it is only a fallback.
+        iv = o["greeks"].get("smv_vol") or o["greeks"].get("mid_iv")
+        if float(oi) > 0 and iv and o.get("expiration_date"):
+            profile_rows.append((float(strike), 1 if otype == "call" else -1,
+                                 float(oi), float(iv), o["expiration_date"]))
     seen = n + n_dropped
     drop_pct = round(100.0 * n_dropped / seen, 2) if seen else None
     oi_seen = used_oi + dropped_oi
@@ -916,15 +1019,43 @@ def _gex_from_options(options, spot: float) -> dict:
         warn = (f"{n_oi_unknown} of {seen} contracts reported NO open interest at all, so how "
                 f"much GEX went missing cannot be measured. Treat the regime/flip/walls as "
                 f"unverified.")
+    # The flip is repriced from contracts carrying an IV; the total uses whatever gamma
+    # the provider sent. Those are different sets, so measure the overlap and refuse a
+    # flip drawn from a minority of the book.
+    flip_oi = sum(row[2] for row in profile_rows)
+    flip_share = round(flip_oi / used_oi, 4) if used_oi else None
+    flip, crossings = _zero_gamma_level(profile_rows, spot, now)
+    flip_note = None
+    if flip is not None and flip_share is not None and flip_share < GEX_FLIP_MIN_OI_SHARE:
+        flip, crossings = None, []
+        flip_note = (f"the re-priced set covers {flip_share:.1%} of open interest, below the "
+                     f"{GEX_FLIP_MIN_OI_SHARE:.0%} floor, so no flip is reported")
+
+    failed = list(expirations_failed or [])
+    degraded_reason = None
+    if failed:
+        degraded_reason = (
+            f"{len(failed)} of {expirations_requested or '?'} expiration(s) returned no chain "
+            f"({', '.join(failed)}). A missing chain never enters the open-interest denominator, "
+            f"so the drop alarm cannot see it; gamma is withheld rather than understated."
+        )
+        warn = degraded_reason
+
     total = sum(by_strike.values())
-    flip = _zero_gamma_level(by_strike)
     top = sorted(by_strike.items(), key=lambda kv: abs(kv[1]), reverse=True)[:5]
-    return {
+    out = {
+        "status": "degraded" if degraded_reason else "ok",
+        "degraded_reason": degraded_reason,
         "total_gex": total,
         "call_gex": call_total,
         "put_gex": -put_total,
         "regime": "positive" if total > 0 else "negative",
         "flip": round(flip, 2) if flip is not None else None,
+        "flip_note": flip_note,
+        # Every zero crossing inside spot ±GEX_FLIP_SCAN_PCT; `flip` is the nearest one.
+        # More than one means gamma changes sign more than once in the window; say so
+        # rather than trusting the nearest blindly.
+        "flip_crossings": [round(c, 2) for c in crossings],
         "call_wall": max(by_strike, key=by_strike.get) if by_strike else None,
         "put_wall": min(by_strike, key=by_strike.get) if by_strike else None,
         "top_walls": [round(float(k), 1) for k, _ in top],
@@ -936,32 +1067,80 @@ def _gex_from_options(options, spot: float) -> dict:
         "dropped_oi_pct": drop_oi_pct,    # the alarm: OI is the multiplier in the formula
         "n_dropped_oi_unknown": n_oi_unknown,
         "data_warning": warn,
+        "coverage": {
+            "expirations_requested": expirations_requested,
+            "expirations_failed": failed,
+            "contracts": n,
+            "contracts_dropped": n_dropped,
+            "oi_used": round(used_oi, 0),
+            "oi_dropped": round(dropped_oi, 0),
+            "flip_oi_share": flip_share,
+        },
+        "spot_source": spot_source,
+        "spot_time": spot_time,
+        "greeks_age": "unknown: the provider supplies no greeks timestamp",
+        "assumptions": [
+            "call gamma counted positive and put gamma negative: dealers assumed long "
+            "customer calls and short customer puts (inferred, never reported)",
+            "open interest is end-of-day, so walls describe the prior session's positioning",
+            "the flip re-prices gamma with Black-Scholes at r=q=0, each contract's own IV, "
+            "a 16:00 ET expiry and a 15-minute floor",
+        ],
     }
+    if degraded_reason:
+        out.update({"regime": None, "flip": None, "flip_crossings": [], "call_wall": None,
+                    "put_wall": None, "top_walls": []})
+    return out
+
+
+def _ms_to_et(ms):
+    """Tradier's epoch-ms timestamp -> ET ISO, or None. Never guessed."""
+    if not ms:
+        return None
+    try:
+        return pd.Timestamp(int(ms), unit="ms", tz="UTC").tz_convert("America/New_York").isoformat()
+    except (TypeError, ValueError):
+        return None
 
 
 def gex_tradier(today: dt.date) -> dict:
     """Front-dated + full-chain GEX for SPY+QQQ from the live Tradier chain.
     NOTE: pre-market this reflects the PRIOR session's IV/greeks (options don't
-    trade overnight) — the brief labels it as such."""
+    trade overnight) — the brief labels it as such. The provider supplies no greeks
+    timestamp, so its age is reported as unknown rather than estimated.
+
+    A failed expiration makes that view DEGRADED: regime, flip and walls are withheld.
+    An understated GEX looks exactly like a genuine shift to negative gamma, so a
+    partial chain has no safe number to publish."""
     out = {}
     for sym in GEX_SYMBOLS:
         try:
             q = _quote(sym)
+            spot_source = "last" if q.get("last") else "close"
             spot = float(q.get("last") or q.get("close"))
+            spot_time = _ms_to_et(q.get("trade_date"))
             exps = sorted(_expirations(sym))
             if not exps:
                 out[sym] = {"error": "no expirations"}
                 continue
-            chains = _chains_parallel(sym, exps)             # fetch once, reuse for both views
+            chains, failed = _chains_parallel(sym, exps)     # fetch once, reuse for both views
             near_exps = exps[:GEX_NEAR_EXPIRATIONS]
+            near_failed = [e for e in near_exps if e in failed]
             near_opts = [o for e in near_exps for o in chains.get(e, [])]
             full_opts = [o for e in exps for o in chains.get(e, [])]
+            ctx = dict(spot_source=spot_source, spot_time=spot_time)
             res = {
                 "spot": round(spot, 2),
-                "near_term": _gex_from_options(near_opts, spot)
-                             | {"expirations": near_exps, "n_expirations": len(near_exps)},
-                "full_chain": _gex_from_options(full_opts, spot)
-                              | {"n_expirations": len(exps), "last_expiration": exps[-1]},
+                "spot_source": spot_source,
+                "spot_time": spot_time,
+                "near_term": _gex_from_options(
+                    near_opts, spot, expirations_requested=len(near_exps),
+                    expirations_failed=near_failed, **ctx)
+                    | {"expirations": near_exps, "n_expirations": len(near_exps)},
+                "full_chain": _gex_from_options(
+                    full_opts, spot, expirations_requested=len(exps),
+                    expirations_failed=failed, **ctx)
+                    | {"n_expirations": len(exps), "last_expiration": exps[-1]},
             }
             out[sym] = res
         except Exception as e:
@@ -1107,6 +1286,18 @@ def gather(today: dt.date | None = None) -> dict:
     }
 
 
+def _flip_text(view: dict) -> str:
+    """The zero-gamma level as the block prints it. No crossing and several crossings
+    both have to read differently from a clean single level."""
+    pct = f"±{GEX_FLIP_SCAN_PCT:.0%}"
+    if view.get("flip") is None:
+        return f"none within {pct} of spot"
+    others = [c for c in view.get("flip_crossings", []) if c != view["flip"]]
+    if others:
+        return f"{view['flip']} (nearest of {len(others) + 1} crossings in {pct}: {view['flip_crossings']})"
+    return str(view["flip"])
+
+
 def _bn(x) -> str:
     """Human-scale a raw GEX figure (they run to the billions) with a sign."""
     try:
@@ -1173,6 +1364,10 @@ def render_md(d: dict) -> str:
             L.append(f"- {k}: ERROR {v['error']}"); continue
         L.append(f"- {v.get('label', k)} ({k}): {v.get('last')}  "
                  f"{v.get('chg_pct')}%  range {v.get('last_range')}  [{v.get('last_date')}]")
+        ra = v.get("roll_adjusted")
+        if ra:
+            L.append(f"    ⚠️ CONTRACT ROLL: daily prev_close {ra['prev_close_daily']} was the old "
+                     f"contract ({ra['gap_pct']}% apart); chg is vs the same-contract prior close")
     L.append(f"- divergence %: {ir.get('divergence_pct')}")
     ni = ir.get("nq_intraday", {})
     if "error" not in ni:
@@ -1294,14 +1489,23 @@ def render_md(d: dict) -> str:
         if "error" in v:
             L.append(f"- {sym}: ERROR {v['error']}"); continue
         nt, fc = v["near_term"], v["full_chain"]
-        L.append(f"- {sym}: spot {v['spot']}")
+        # A degraded view has no regime, flip or walls — the fields are nulled upstream.
+        # Printing the partial totals here would invite a regime call from a chain that
+        # is missing an expiration, which is the one failure that looks like a market move.
+        if nt.get("status") == "degraded" or fc.get("status") == "degraded":
+            reason = fc.get("degraded_reason") or nt.get("degraded_reason")
+            L.append(f"- {sym}: 🔴 GAMMA READ UNAVAILABLE — {reason}")
+            L.append("    do not write a regime call, a flip, or walls for this symbol")
+            continue
+        L.append(f"- {sym}: spot {v['spot']} ({v.get('spot_source') or 'source unknown'} "
+                 f"@ {v.get('spot_time') or 'time unknown'})")
         L.append(f"    near-term ({nt['n_expirations']} exp {nt.get('expirations')}): "
                  f"regime **{nt['regime']}**, total {_bn(nt['total_gex'])}, "
-                 f"zero-gamma flip {nt['flip']}, call wall {nt['call_wall']}, put wall {nt['put_wall']}, "
+                 f"zero-gamma flip {_flip_text(nt)}, call wall {nt['call_wall']}, put wall {nt['put_wall']}, "
                  f"walls {nt['top_walls']}")
         L.append(f"    full-chain ({fc['n_expirations']} exp, thru {fc.get('last_expiration')}): "
                  f"regime **{fc['regime']}**, total {_bn(fc['total_gex'])}, "
-                 f"zero-gamma flip {fc['flip']}, call wall {fc['call_wall']}, put wall {fc['put_wall']}")
+                 f"zero-gamma flip {_flip_text(fc)}, call wall {fc['call_wall']}, put wall {fc['put_wall']}")
         # Silent when the chain is healthy. "Healthy" means no OPEN INTEREST went missing —
         # a nonzero `dropped_pct` alone is normal (newly-listed strikes carry no greeks and
         # no OI, and contribute exactly zero GEX). This only appears when the feed is truly
@@ -1310,6 +1514,12 @@ def render_md(d: dict) -> str:
         warn = fc.get("data_warning") or nt.get("data_warning")
         if warn:
             L.append(f"    🔴 CHAIN INCOMPLETE — {warn}")
+        cov = fc.get("coverage") or {}
+        L.append(f"    coverage: {cov.get('contracts', 'n/a')} contracts, "
+                 f"OI used {cov.get('oi_used', 'n/a')}, "
+                 f"flip OI share {cov.get('flip_oi_share', 'n/a')}, "
+                 f"expirations failed {len(cov.get('expirations_failed') or [])}")
+        L.append(f"    greeks: {fc.get('greeks_age') or 'age unknown'}")
 
     L.append("\n## Finnhub headlines")
     fh = d["finnhub"]
