@@ -4,6 +4,18 @@ Notable changes to market-brief, newest first. Format follows
 [Keep a Changelog](https://keepachangelog.com/). This project does not publish
 version numbers; entries are dated.
 
+## 2026-11-16
+
+### Changed
+
+- **Live on a schedule.** The first scheduled run fired at 07:35 Chicago and exited 0:
+  compose produced 5,189 bytes, validation passed, 22 sourced claims were recorded,
+  and 4 messages went to each of the two production webhooks. Both ledger entries
+  are present, so the duplicate guard is working on the real path.
+- `.gitignore`: `briefs/2026-11-15.md` is excluded. It was a Sunday dry run of
+  compose/validate that was generated but never posted, so it is not part of the
+  archive — that folder holds posted briefs only. The file is left on disk.
+
 ## 2026-11-14
 
 ### Added
