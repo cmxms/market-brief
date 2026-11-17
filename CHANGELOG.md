@@ -4,6 +4,28 @@ Notable changes to market-brief, newest first. Format follows
 [Keep a Changelog](https://keepachangelog.com/). This project does not publish
 version numbers; entries are dated.
 
+## 2026-11-17
+
+### Removed
+
+- **`BACKLOG.md` retired: 170 lines down to 26.** Every remaining entry was fixed, moot, or too
+  small to keep tracking, and two sections already had a better owner — the ISM / Fed-speaker
+  sweep is a run-time procedure documented in `playbook.md` step 2, and the calendar entries are
+  in `t1_calendar.yaml`. Open work for this project now goes on the workspace list
+  (`CMXMS/WORKLIST.md`), which is the one list that gets read. The four still-real imperfections
+  were carried over there rather than dropped; the full reasoning for every closed item stays in
+  git history.
+
+### Fixed
+
+- Two documents described `brief-live` as a live consumer of `gather.py` ("so playbook.md and
+  brief-live keep working"). That dashboard was retired with CMTMS and no longer exists; the
+  statements now say what is actually true and record that it is gone.
+
+### Added
+
+- `briefs/2026-11-17.md` — the scheduled brief, archived.
+
 ## 2026-11-16
 
 ### Changed

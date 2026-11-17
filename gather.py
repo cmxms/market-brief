@@ -1545,8 +1545,8 @@ def _archive_previous_run(date: str) -> str | None:
     is gitignored, so the original run was simply gone.
 
     Deliberately archive rather than rename the live file: data/{date}.json stays
-    "the latest run", so playbook.md, brief-live and anything else reading that path
-    are untouched. The archive is keyed by the SAME HH:MM the brief's stamp shows, so
+    "the latest run", so playbook.md and anything else reading that path are untouched.
+    (`brief-live`, which used to import these functions live, was retired with CMTMS.) The archive is keyed by the SAME HH:MM the brief's stamp shows, so
     any past brief resolves to exactly one file with no extra bookkeeping.
 
     That key is **ET**, from the block's own tz-aware `as_of` — the same clock as the

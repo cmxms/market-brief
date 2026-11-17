@@ -209,7 +209,9 @@ tagged against a theme keyword list, because a pure macro search misses sector c
 ## Outputs — the other half of the contract
 
 1. `data/{date}.json` — every number, machine-readable. **Always "the latest run"** — the path
-   never changes, so `playbook.md` and `brief-live` keep working.
+   never changes, so `playbook.md` and any other reader of that path keep working.
+   (`brief-live`, the dashboard that used to import these functions, was retired with CMTMS;
+   the rule stands for whatever reads it next.)
 2. `data/{date}.data.md` — the same thing as a human-readable block
 3. `data/runs/{date}-{HHMM}.json` + `.data.md` — a **superseded** run, moved here automatically
    before a re-run overwrites it (added 2026-08-02). `HHMM` is the same time the brief's
