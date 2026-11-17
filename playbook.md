@@ -57,7 +57,8 @@ calls: it informs the reader's own regime call.
 3. **Write the brief** to the 6-section template below.
 
    *(The TL;DR card was retired 2026-08-17 — the brief posts as text only. Don't write a
-   `<!-- CARD -->` block. `tldr_card.py` is still on disk, unused, if it's ever wanted back.)*
+   `<!-- CARD -->` block. `tldr_card.py` was removed from the project on 2026-11-16; it is
+   recoverable from git history if the card is ever wanted back.)*
 
 4. **Output:** print the brief copy-paste-ready in the CLI, save it to
    `briefs/{YYYY-MM-DD}.md`, and post it:

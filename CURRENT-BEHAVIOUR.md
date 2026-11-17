@@ -138,9 +138,9 @@ chain stays silent, and zero-OI drops are asserted to leave GEX/flip/walls bit-i
 process notes."
 
 **The card honors the same flag** (added 2026-08-05; **card retired 2026-08-17** — the brief now
-posts as text only and `tldr_card.py` is unused. Kept below because the lesson outlives the
-feature, and because it's the contract to restore if the card ever comes back.) `tldr_card.py`'s
-number strip used to read
+posts as text only, and `tldr_card.py` was removed on 2026-11-16, recoverable from git history.
+Kept below because the lesson outlives the feature, and because it's the contract to restore if the
+card ever comes back.) `tldr_card.py`'s number strip used to read
 `gex.SPY.near_term.regime` unconditionally and print `SPY GAMMA: POSITIVE`. On 2026-08-05 that
 put a confident regime call on the graphic while the brief — correctly following the playbook —
 said the gamma read was unavailable. **The card contradicted the text it was rendered from.**
