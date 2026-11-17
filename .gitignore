@@ -2,6 +2,7 @@
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 data/
 _harvest/
 # briefs/ is intentionally committed — it's the shareable archive of past briefs.
