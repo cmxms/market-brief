@@ -24,7 +24,8 @@ minutes of RTH**, not "after the open" generally.
   the symbol. On 08-04 only `full_chain` was affected — `near_term` was 0-dropped on both
   symbols — but it reads as symbol-wide, so the gamma call got killed on a clean view. Label the
   view, or warn per-view.
-- [x] 🟡 **`tldr_card.py` chain-incomplete awareness — DONE 2026-08-05.** ~~It printed
+- [x] 🟡 **`tldr_card.py` chain-incomplete awareness — DONE 2026-08-05.** *(File removed from the
+  project 2026-11-16; recoverable from git history.)* ~~It printed
   `SPY GAMMA POSITIVE` straight from the JSON regardless.~~ It now prints `SPY GAMMA N/A` in
   muted ink when `near_term.data_warning` is set. **The bug fired for real on 08-05:** the brief
   correctly said the gamma read was unavailable and the card stamped POSITIVE on the graphic
