@@ -359,12 +359,55 @@ def pull_intraday_nq() -> dict:
         return {"error": f"NQ intraday unavailable: {type(e).__name__}"}
 
 
-def _weekdays_behind(last_date: dt.date, today: dt.date) -> int:
-    """Weekdays strictly between last_date and today. 0 = fresh (has the prior
-    session), >=1 = at least one full session missing = stale. Holiday-blind."""
+def _market_holidays(year: int) -> set[dt.date]:
+    """Recurring closures under the brief's weekend-observance rules.
+
+    Membership only; early closes and unscheduled closures are not modelled.
+    """
+    def observed(day):
+        if day.weekday() == 5:
+            return day - dt.timedelta(days=1)
+        if day.weekday() == 6:
+            return day + dt.timedelta(days=1)
+        return day
+
+    def nth_weekday(month, weekday, n):
+        first = dt.date(year, month, 1)
+        return first + dt.timedelta(days=(weekday - first.weekday()) % 7 + 7 * (n - 1))
+
+    # Anonymous Gregorian algorithm: Easter Sunday, then back two days to Good Friday.
+    a = year % 19
+    b, c = divmod(year, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month, day = divmod(h + l - 7 * m + 114, 31)
+    easter = dt.date(year, month, day + 1)
+    holidays = {
+        nth_weekday(1, 0, 3), nth_weekday(2, 0, 3),
+        easter - dt.timedelta(days=2),
+        dt.date(year, 5, 31) - dt.timedelta(days=dt.date(year, 5, 31).weekday()),
+        nth_weekday(9, 0, 1), nth_weekday(11, 3, 4),
+    }
+    # Adjacent years cover observed New Year's dates crossing a year boundary.
+    for y in (year - 1, year, year + 1):
+        for month, day in ((1, 1), (6, 19), (7, 4), (12, 25)):
+            holiday = observed(dt.date(y, month, day))
+            if holiday.year == year:
+                holidays.add(holiday)
+    return holidays
+
+
+def _sessions_behind(last_date: dt.date, today: dt.date) -> int:
+    """Sessions strictly between last_date and today; >=1 means a close is missing."""
+    holidays = set().union(*(_market_holidays(y) for y in range(last_date.year, today.year + 1)))
     n, d = 0, last_date + dt.timedelta(days=1)
     while d < today:
-        if d.weekday() < 5:
+        if d.weekday() < 5 and d not in holidays:
             n += 1
         d += dt.timedelta(days=1)
     return n
@@ -484,14 +527,14 @@ def treasury_yields(today: dt.date) -> dict:
     # Use the oldest leg as the aggregate freshness stamp; each tenor retains its date.
     last_date = min((dt.date.fromisoformat(v["last_date"]) for v in tenors.values()), default=None)
 
-    behind = _weekdays_behind(last_date, today) if last_date else None
+    behind = _sessions_behind(last_date, today) if last_date else None
     return {
         "mode": "EOD",
         "tenors": tenors,
         "source": source or "UNAVAILABLE",
         "last_date": str(last_date) if last_date else None,
         "as_of": str(last_date) if last_date else None,
-        "weekdays_behind": behind,
+        "sessions_behind": behind,
         "stale": bool(behind and behind >= 1),
         "failures": failures,
         "error": _unavailable("Yields", failures) if not tenors else None,
@@ -550,10 +593,12 @@ def _yahoo_chart_yields() -> dict:
     return out
 
 
-def live_yields(today: dt.date) -> dict:
+def live_yields(today: dt.date, *, crosscheck: bool = False) -> dict:
     """CNBC -> Yahoo intraday; caller can use an explicitly labelled EOD fallback."""
     failures = []
     c = _attempt("CNBC yields", _cnbc_yields, failures)
+    # Daily gather retains one reference download alongside the published primary.
+    y = _attempt("Yahoo yields", _yahoo_chart_yields, failures) if not c or crosscheck else {}
     if c:
         times = [v["time"] for v in c.values() if v.get("time")]
         as_of = min(times) if len(times) == len(c) else None
@@ -565,8 +610,8 @@ def live_yields(today: dt.date) -> dict:
             "tenors": {t: {"last": v["last"], "chg": v["chg"]} for t, v in c.items()},
             "as_of": as_of, "last_date": as_of_date, "market_status": status,
             "stale": not as_of_date or as_of_date < str(today), "failures": failures,
+            "source_samples": {"CNBC yields": c, "Yahoo yields": y},
         }
-    y = _attempt("Yahoo yields", _yahoo_chart_yields, failures)
     if y:
         times = [v.get("as_of") for v in y.values() if v.get("as_of")]
         as_of = min(times) if times else None
@@ -576,8 +621,10 @@ def live_yields(today: dt.date) -> dict:
             "tenors": y, "as_of": as_of, "last_date": as_of[:10] if as_of else None,
             "market_status": None, "stale": not as_of or as_of[:10] < str(today),
             "failures": failures,
+            "source_samples": {"CNBC yields": c, "Yahoo yields": y},
         }
-    return {"failures": failures, "error": _unavailable("Live yields", failures)}
+    return {"failures": failures, "error": _unavailable("Live yields", failures),
+            "source_samples": {"CNBC yields": c, "Yahoo yields": y}}
 
 
 def _cnbc_vol() -> dict:
@@ -742,16 +789,24 @@ def _compare_sources(primary: dict, fallback: dict, tol: float) -> dict:
     return {"rows": rows, "all_match": all_match if rows else None, "n": len(rows), "tol": tol}
 
 
-def source_crosscheck() -> dict:
-    """Each morning, confirm CNBC (primary) and Yahoo v8 (fallback) AGREE on the live
-    numbers — a mismatch flags a bad feed before it reaches the brief."""
+def source_crosscheck(samples: dict | None = None) -> dict:
+    """Compare retained samples; only a wholly absent set permits a labelled re-fetch."""
     failures = []
-    cy = _attempt("CNBC yields", _cnbc_yields, failures)
-    yy = _attempt("Yahoo yields", _yahoo_chart_yields, failures)
-    cv = _attempt("CNBC volatility", _cnbc_vol, failures)
-    yv = _attempt("Yahoo volatility", _yahoo_vol, failures)
+    sources = [("CNBC yields", _cnbc_yields), ("Yahoo yields", _yahoo_chart_yields),
+               ("CNBC volatility", _cnbc_vol), ("Yahoo volatility", _yahoo_vol)]
+    refetched = not samples or not any(samples.values())
+    samples = samples or {}
+    if refetched:
+        samples = {name: _attempt(name, fetch, failures) for name, fetch in sources}
+    else:
+        for name, _ in sources:
+            if not samples.get(name):
+                failures.append((name, "no gathered sample"))
+    cy, yy, cv, yv = (samples.get(name, {}) for name, _ in sources)
     return {
         "failures": failures,
+        "sample_basis": ("Last-resort re-fetch — not the published sample"
+                         if refetched else "Gathered samples"),
         "yields": _compare_sources({k: v["last"] for k, v in cy.items()},
                                    {k: v["last"] for k, v in yy.items()}, tol=0.03),
         "vol": _compare_sources({k: v["last"] for k, v in cv.items()},
@@ -801,18 +856,22 @@ def _vol_term_structure(vix: dict, vix9d: dict) -> dict | None:
     return ts
 
 
-def macro_pulse(today: dt.date | None = None) -> dict:
+def macro_pulse(today: dt.date | None = None, *, crosscheck: bool = False) -> dict:
     today = today or pd.Timestamp.now(tz="America/New_York").date()
-    live = live_yields(today)
+    live = live_yields(today, crosscheck=True) if crosscheck else live_yields(today)
     eod = treasury_yields(today)
     out = {"yields": live if live.get("tenors") else eod, "yields_eod_close": eod}
+    out["source_samples"] = dict(live.get("source_samples", {}))
+    if eod.get("tenors"):
+        out["source_samples"][eod["source"]] = eod["tenors"]
     out["failures"] = live.get("failures", []) + eod.get("failures", [])
     if not live.get("tenors") and not eod.get("tenors"):
         out["yields"] = {**eod, "error": _unavailable("Yields", out["failures"])}
     vol_failures = []
     cnbc = _attempt("CNBC volatility", _cnbc_vol, vol_failures)
     need_yahoo = any(not cnbc.get(t) for t in VOL_TICKERS)
-    yahoo = _attempt("Yahoo volatility", _yahoo_vol, vol_failures) if need_yahoo else {}
+    yahoo = _attempt("Yahoo volatility", _yahoo_vol, vol_failures) if need_yahoo or crosscheck else {}
+    out["source_samples"].update({"CNBC volatility": cnbc, "Yahoo volatility": yahoo})
     official = cboe_vol_official()
     out["vol_official"] = official
     for t, lbl in VOL_TICKERS.items():
@@ -835,6 +894,8 @@ def macro_pulse(today: dt.date | None = None) -> dict:
                 failures.append((f"Cboe {t}", "no settled level"))
         if d:
             d = {**d, "stale": not d.get("last_date") or d["last_date"] < str(today)}
+            if d.get("source") not in ("CNBC", "Yahoo(intraday)"):
+                out["source_samples"].setdefault(d["source"], {})[t] = d
         out[t] = d or {"error": _unavailable(t, failures)}
         out["failures"].extend(failures)
 
@@ -1199,37 +1260,45 @@ def gex_tradier(today: dt.date) -> dict:
     partial chain has no safe number to publish."""
     out = {}
     for sym in GEX_SYMBOLS:
+        stage = "Tradier spot quote (near-term and full-chain views)"
         try:
             q = _quote(sym)
             spot_source = "last" if q.get("last") else "close"
             spot = float(q.get("last") or q.get("close"))
             spot_time = _ms_to_et(q.get("trade_date"))
+            stage = "Tradier expirations (near-term and full-chain views)"
             exps = sorted(_expirations(sym))
             if not exps:
-                out[sym] = {"error": "no expirations"}
+                out[sym] = {"error": "Tradier expirations unavailable: no expirations; "
+                                     "GEX near-term and full-chain views unavailable"}
                 continue
+            stage = "Tradier expiry chains (near-term and full-chain views)"
             chains, failed = _chains_parallel(sym, exps)     # fetch once, reuse for both views
             near_exps = exps[:GEX_NEAR_EXPIRATIONS]
             near_failed = [e for e in near_exps if e in failed]
             near_opts = [o for e in near_exps for o in chains.get(e, [])]
             full_opts = [o for e in exps for o in chains.get(e, [])]
             ctx = {"spot_source": spot_source, "spot_time": spot_time}
+
+            def compute_view(options, spot, requested, failed, ctx):
+                try:
+                    return _gex_from_options(options, spot, expirations_requested=requested,
+                                             expirations_failed=failed, **ctx)
+                except (ValueError, KeyError, TypeError, IndexError) as exc:
+                    return {"error": f"Tradier chain computation failed: {type(exc).__name__}"}
+
             res = {
                 "spot": round(spot, 2),
                 "spot_source": spot_source,
                 "spot_time": spot_time,
-                "near_term": _gex_from_options(
-                    near_opts, spot, expirations_requested=len(near_exps),
-                    expirations_failed=near_failed, **ctx)
+                "near_term": compute_view(near_opts, spot, len(near_exps), near_failed, ctx)
                     | {"expirations": near_exps, "n_expirations": len(near_exps)},
-                "full_chain": _gex_from_options(
-                    full_opts, spot, expirations_requested=len(exps),
-                    expirations_failed=failed, **ctx)
+                "full_chain": compute_view(full_opts, spot, len(exps), failed, ctx)
                     | {"n_expirations": len(exps), "last_expiration": exps[-1]},
             }
             out[sym] = res
         except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as e:
-            out[sym] = {"error": f"gamma read unavailable: {type(e).__name__}"}
+            out[sym] = {"error": f"gamma read unavailable: {type(e).__name__} — {stage}"}
     return out
 
 
@@ -1357,7 +1426,7 @@ def finnhub_news(key: str) -> dict:
 def gather(today: dt.date | None = None) -> dict:
     _et = pd.Timestamp.now(tz="America/New_York")
     today = today or _et.date()
-    return {
+    block = {
         # ET, not local. This field names the data/runs/ archive (_archive_previous_run),
         # and a naive local clock silently offset every archived filename from the brief's
         # own ET stamp — on a UTC-1 machine the 9:31 AM ET run archived as `-0831`, so the
@@ -1368,12 +1437,13 @@ def gather(today: dt.date | None = None) -> dict:
         "date": str(today),
         "event_gate": event_gate(today),
         "index_recap": index_recap(),
-        "macro_pulse": macro_pulse(today),
-        "source_crosscheck": source_crosscheck(),
+        "macro_pulse": macro_pulse(today, crosscheck=True),
         "sector_rotation": sector_rotation(),
         "gex": gex_tradier(today),
         "finnhub": finnhub_news(_finnhub_key()),
     }
+    block["source_crosscheck"] = source_crosscheck(block["macro_pulse"].get("source_samples", {}))
+    return block
 
 
 def _flip_text(view: dict) -> str:
@@ -1546,6 +1616,8 @@ def render_md(d: dict) -> str:
     cc = d.get("source_crosscheck", {})
     if cc:
         L.append("\n## Source cross-check (CNBC primary vs Yahoo v8 fallback)")
+        if cc.get("sample_basis", "").startswith("Last-resort"):
+            L.append(f"- {cc['sample_basis']}")
         for source, reason in cc.get("failures", []):
             L.append(f"- Cross-check unavailable: {source} ({reason})")
         for grp, lbl, unit in [("yields", "Yields", "bp"), ("vol", "Vol", "pt")]:
@@ -1595,38 +1667,49 @@ def render_md(d: dict) -> str:
         v = d["gex"].get(sym, {})
         if "error" in v:
             L.append(f"- {sym}: ERROR {v['error']}"); continue
-        nt, fc = v["near_term"], v["full_chain"]
-        # A degraded view has no regime, flip or walls — the fields are nulled upstream.
-        # Printing the partial totals here would invite a regime call from a chain that
-        # is missing an expiration, which is the one failure that looks like a market move.
-        if nt.get("status") == "degraded" or fc.get("status") == "degraded":
-            reason = fc.get("degraded_reason") or nt.get("degraded_reason")
-            L.append(f"- {sym}: 🔴 GAMMA READ UNAVAILABLE — {reason}")
-            L.append("    do not write a regime call, a flip, or walls for this symbol")
+        nt, fc = v.get("near_term") or {}, v.get("full_chain") or {}
+        views = [("near-term", nt), ("full-chain", fc)]
+        unavailable = [(label, view) for label, view in views
+                       if not view or view.get("error") or view.get("status") == "degraded"]
+        if len(unavailable) == 2:
+            L.append(f"- {sym}: 🔴 GAMMA READ UNAVAILABLE")
+        for label, view in unavailable:
+            reason = view.get("degraded_reason") or view.get("error") or "no computed view"
+            remaining = next((name for name, other in views if (name, other) not in unavailable), None)
+            shown = f"; {remaining} view shown" if remaining else ""
+            L.append(f"    {sym}: GEX {label} view unavailable — {reason}{shown}")
+            L.append(f"    do not write a regime call, a flip, or walls for the {label} view")
+        if len(unavailable) == 2:
             continue
         L.append(f"- {sym}: spot {v['spot']} ({v.get('spot_source') or 'source unknown'} "
                  f"@ {v.get('spot_time') or 'time unknown'})")
-        L.append(f"    near-term ({nt['n_expirations']} exp {nt.get('expirations')}): "
-                 f"regime **{nt['regime']}**, total {_bn(nt['total_gex'])}, "
-                 f"zero-gamma flip {_flip_text(nt)}, call wall {nt['call_wall']}, put wall {nt['put_wall']}, "
-                 f"walls {nt['top_walls']}")
-        L.append(f"    full-chain ({fc['n_expirations']} exp, thru {fc.get('last_expiration')}): "
-                 f"regime **{fc['regime']}**, total {_bn(fc['total_gex'])}, "
-                 f"zero-gamma flip {_flip_text(fc)}, call wall {fc['call_wall']}, put wall {fc['put_wall']}")
+        for label, view in views:
+            if (label, view) in unavailable:
+                continue
+            scope = (f"{view['n_expirations']} exp {view.get('expirations')}" if label == "near-term"
+                     else f"{view['n_expirations']} exp, thru {view.get('last_expiration')}")
+            walls = f", walls {view['top_walls']}" if label == "near-term" else ""
+            L.append(f"    {label} ({scope}): "
+                     f"regime **{view['regime']}**, total {_bn(view['total_gex'])}, "
+                     f"zero-gamma flip {_flip_text(view)}, call wall {view['call_wall']}, "
+                     f"put wall {view['put_wall']}{walls}")
+            if view.get("flip_note"):
+                L.append(f"    GEX {label} flip unavailable — {view['flip_note']}")
         # Silent when the chain is healthy. "Healthy" means no OPEN INTEREST went missing —
         # a nonzero `dropped_pct` alone is normal (newly-listed strikes carry no greeks and
         # no OI, and contribute exactly zero GEX). This only appears when the feed is truly
         # degraded, and it is a note to the WRITER, not brief copy: see playbook.md's
         # "never publish process notes".
-        warn = fc.get("data_warning") or nt.get("data_warning")
-        if warn:
-            L.append(f"    🔴 CHAIN INCOMPLETE — {warn}")
-        cov = fc.get("coverage") or {}
+        for label, view in views:
+            if view.get("data_warning") and (label, view) not in unavailable:
+                L.append(f"    🔴 CHAIN INCOMPLETE — GEX {label}: {view['data_warning']}")
+        available = next(view for label, view in views if (label, view) not in unavailable)
+        cov = (fc if ("full-chain", fc) not in unavailable else available).get("coverage") or {}
         L.append(f"    coverage: {cov.get('contracts', 'n/a')} contracts, "
                  f"OI used {cov.get('oi_used', 'n/a')}, "
                  f"flip OI share {cov.get('flip_oi_share', 'n/a')}, "
                  f"expirations failed {len(cov.get('expirations_failed') or [])}")
-        L.append(f"    greeks: {fc.get('greeks_age') or 'age unknown'}")
+        L.append(f"    greeks: {available.get('greeks_age') or 'age unknown'}")
 
     L.append("\n## Finnhub headlines")
     fh = d["finnhub"]
@@ -1634,11 +1717,11 @@ def render_md(d: dict) -> str:
         L.append(f"- Finnhub headlines: UNAVAILABLE — {fh['error']}")
     L.append(f"- status: {fh.get('status')}")
     L.append("- GENERAL (trusted-first):")
-    for x in fh.get("general", [])[:12]:
+    for x in fh.get("general", []):
         tag = "★" if x["trusted"] else " "
         L.append(f"  {tag} [{x['source']}] {x['headline']}  ({x['dt']})")
     L.append("- THEMED:")
-    for x in fh.get("themed", [])[:10]:
+    for x in fh.get("themed", []):
         L.append(f"  • [{x['source']}] {x['headline']}")
     return "\n".join(L)
 
