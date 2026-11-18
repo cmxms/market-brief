@@ -229,6 +229,7 @@ def test_test_channel_send_and_force(monkeypatch, tmp_path):
     assert run.call_count == 2
     assert [r["target"] for r in rows()] == ["test", "test"]
     assert not list(tmp_path.glob("*.md"))
+    assert run.call_args.kwargs["check"] is False
 
 
 def test_test_channel_failure_scrubbed_before_truncation(monkeypatch, tmp_path):

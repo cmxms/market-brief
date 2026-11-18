@@ -87,17 +87,16 @@ check("a brief stamped another day stays silent", not fired, f"fired={fired}")
 
 # 6. Never break a post: an unreadable stamp, a future stamp and a missing data file all
 #    return cleanly rather than raising.
+P._now_et, real = (lambda: datetime(2026, 8, 25, 9, 0, tzinfo=ET)), P._now_et
 try:
-    P._now_et, real = (lambda: datetime(2026, 8, 25, 9, 0, tzinfo=ET)), P._now_et
     with redirect_stdout(io.StringIO()):
         a = P.stale_check("# x\n\nno stamp at all\n")
         b = P.stale_check("# x\n*Data pulled Tue Aug 25, 2026 11:00 PM ET*\n\nbody\n")
         c = P._calendar_events_today(datetime(1999, 1, 1).date())
-    P._now_et = real
     check("degraded inputs return quietly instead of raising",
           a is False and b is False and c == [], f"nostamp={a} future={b} missing={c}")
-except Exception as e:  # pragma: no cover
-    check("degraded inputs return quietly instead of raising", False, f"raised {e!r}")
+finally:
+    P._now_et = real
 
 print(f"\n{_passed}/{_passed + _failed} passed")
 if __name__ == "__main__":

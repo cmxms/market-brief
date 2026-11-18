@@ -149,3 +149,17 @@ def test_success_keeps_command_and_output_contract(composer):
     assert str(out) in prompt
     assert str(config.STATE / f"claims-{DATE}.json") in prompt
     assert "compose environment: filtered" in log.read_text(encoding="utf-8")
+    assert process.call_args.kwargs["check"] is False
+    assert "Never silently omit a failed section" in prompt
+
+
+def test_nonzero_exit_rejects_even_a_fresh_brief(composer):
+    run, process, out, _ = composer
+
+    def failed_child(*args, **kwargs):
+        out.write_text("test brief", encoding="utf-8")
+        return Mock(returncode=7, stdout="", stderr="failed")
+
+    process.side_effect = failed_child
+    assert run() == (False, "compose failed (hermes exit 7)")
+    assert process.call_args.kwargs["check"] is False

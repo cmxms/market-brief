@@ -40,6 +40,8 @@ Rules that override everything else:
 - Do not post anywhere and do not attempt to. You have no tool that can.
 - Do not include source links, citations, URLs or a Sources section in the brief.
 - Never invent a number. If a figure is missing, leave it out or say it is unavailable.
+- If a gathered section is unavailable, say so and include its stated reason in the
+  corresponding brief section. Never silently omit a failed section.
 - Stay under {max_chars} characters.
 - Keep the canonical section headers and their order exactly as playbook.md fixes them.
 - Include the stamp line `*Data pulled ... ET*`, using the data block's own as_of_et.
@@ -95,7 +97,8 @@ def run(date: str, data_md: Path, out: Path, log_path: Path) -> tuple[bool, str]
         log.write(" ".join(cmd) + "\n")
         try:
             proc = subprocess.run(cmd, env=child_env, capture_output=True, text=True, encoding="utf-8",
-                                  errors="replace", timeout=int(model_cfg.get("run_budget_seconds", 900)) + 120)
+                                  errors="replace", timeout=int(model_cfg.get("run_budget_seconds", 900)) + 120,
+                                  check=False)
         except subprocess.TimeoutExpired:
             log.write("compose timed out\n")
             return False, "compose timed out"
@@ -110,6 +113,8 @@ def run(date: str, data_md: Path, out: Path, log_path: Path) -> tuple[bool, str]
 
     if not out.exists():
         return False, f"no brief written (hermes exit {proc.returncode})"
+    if proc.returncode != 0:
+        return False, f"compose failed (hermes exit {proc.returncode})"
     if out.stat().st_mtime < started - 5:
         return False, "brief file was not rewritten by this run"
     return True, f"hermes exit {proc.returncode}, {out.stat().st_size} bytes"

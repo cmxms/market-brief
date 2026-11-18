@@ -79,11 +79,8 @@ check("puts-only book reports no flip rather than inventing one",
 
 # 5. An expired-today contract after the close must not divide by zero.
 late = pd.Timestamp("2026-10-02 17:30", tz="America/New_York")
-try:
-    G._zero_gamma_level([(700.0, 1, 1000.0, 0.2, EXP), (690.0, -1, 1000.0, 0.2, EXP)], SPOT, late)
-    check("contract past expiry is floored, not a crash", True)
-except Exception as e:
-    check("contract past expiry is floored, not a crash", False, repr(e))
+G._zero_gamma_level([(700.0, 1, 1000.0, 0.2, EXP), (690.0, -1, 1000.0, 0.2, EXP)], SPOT, late)
+check("contract past expiry is floored, not a crash", True)
 
 print(f"\n{6 - len(failures)}/6 passed")
 if failures:

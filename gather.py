@@ -192,7 +192,7 @@ ROLL_TOL_PCT = 0.4
 
 def _intraday_prior_close(ticker: str) -> tuple[float | None, float | None]:
     """(prior session's <=16:00 ET close, latest 1m close) from the 1-minute series,
-    which yfinance serves from ONE contract across the window. (None, None) on failure."""
+    which yfinance serves from ONE contract across the window. Errors stop the run."""
     try:
         h = yf.download(ticker, period="5d", interval="1m", progress=False, auto_adjust=False)
         if h.empty:
@@ -208,8 +208,8 @@ def _intraday_prior_close(ticker: str) -> tuple[float | None, float | None]:
             if len(prior):
                 return float(prior.iloc[-1]), float(c.iloc[-1])
         return None, float(c.iloc[-1])
-    except Exception:
-        return None, None
+    except (ValueError, KeyError, IndexError) as exc:
+        raise RuntimeError(f"Contract-roll verification unavailable: {type(exc).__name__}") from None
 
 
 def roll_guard(last: float, prev_daily: float, prev_1m: float | None, last_1m: float | None,
@@ -260,8 +260,8 @@ def pull_daily(ticker: str) -> dict:
             out["roll_adjusted"] = {"prev_close_daily": round(roll["prev_close_daily"], 3),
                                     "gap_pct": roll["gap_pct"]}
         return out
-    except Exception as e:
-        return {"error": repr(e)}
+    except (ValueError, KeyError, IndexError) as e:
+        return {"error": f"daily prices unavailable: {type(e).__name__}"}
 
 
 def pull_intraday_nq() -> dict:
@@ -312,8 +312,8 @@ def pull_intraday_nq() -> dict:
             "gap": round(last_px - prior_close, 2) if prior_close else None,
             "overnight_range": [round(on_lo, 2), round(on_hi, 2)],
         }
-    except Exception as e:
-        return {"error": repr(e)}
+    except (ValueError, KeyError, IndexError) as e:
+        return {"error": f"NQ intraday unavailable: {type(e).__name__}"}
 
 
 def _weekdays_behind(last_date: dt.date, today: dt.date) -> int:
@@ -329,7 +329,7 @@ def _weekdays_behind(last_date: dt.date, today: dt.date) -> int:
 
 def _treasury_curve_rows(year: int) -> list:
     """[(date, {tenor: float}), ...] newest-first from the US Treasury Daily Par
-    Yield Curve CSV. [] on any failure (caller falls back to FRED)."""
+    Yield Curve CSV. Empty data permits fallback; request/parse errors stop the run."""
     url = ("https://home.treasury.gov/resource-center/data-chart-center/"
            f"interest-rates/daily-treasury-rates.csv/{year}/all")
     try:
@@ -341,8 +341,8 @@ def _treasury_curve_rows(year: int) -> list:
         for rec in csv.DictReader(io.StringIO(r.text)):
             try:
                 d = dt.datetime.strptime(rec["Date"].strip(), "%m/%d/%Y").date()
-            except Exception:
-                continue
+            except (KeyError, ValueError) as exc:
+                raise ValueError(f"Treasury curve date unreadable: {type(exc).__name__}") from None
             vals = {}
             for ten, col in _TSY_COL.items():
                 raw = (rec.get(col) or "").strip()
@@ -350,17 +350,17 @@ def _treasury_curve_rows(year: int) -> list:
                     try:
                         vals[ten] = float(raw)
                     except ValueError:
-                        pass
+                        raise ValueError(f"Treasury curve {ten} value unreadable") from None
             if vals:
                 rows.append((d, vals))
         rows.sort(key=lambda x: x[0], reverse=True)
         return rows
-    except Exception:
-        return []
+    except (httpx.HTTPError, ValueError, csv.Error) as exc:
+        raise RuntimeError(f"Treasury curve unavailable: {type(exc).__name__}") from None
 
 
 def _fred_yields() -> dict:
-    """{tenor: [(date, value), ...newest-first]} from FRED. {} on failure."""
+    """{tenor: [(date, value), ...newest-first]} from FRED. Errors stop the run."""
     key = _fred_key()
     if not key:
         return {}
@@ -370,12 +370,13 @@ def _fred_yields() -> dict:
             r = httpx.get("https://api.stlouisfed.org/fred/series/observations",
                           params={"series_id": sid, "api_key": key, "file_type": "json",
                                   "sort_order": "desc", "limit": 5}, timeout=20)
+            r.raise_for_status()
             obs = [(o["date"], float(o["value"])) for o in r.json().get("observations", [])
                    if o.get("value") not in (".", "", None)]
             if obs:
                 out[ten] = obs
-        except Exception:
-            pass
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            raise RuntimeError(f"FRED {ten} unavailable: {type(exc).__name__}") from None
     return out
 
 
@@ -438,7 +439,7 @@ def treasury_yields(today: dt.date) -> dict:
 
 def _cnbc_yields() -> dict:
     """LIVE benchmark UST yields from CNBC's quote webservice (the actual cash yield,
-    not the CBOE index). {tenor: {last, chg, time, status}} or {} on failure."""
+    not the CBOE index). Request/parse errors stop the run."""
     sym_map = {"US2Y": "2Y", "US5Y": "5Y", "US10Y": "10Y", "US30Y": "30Y"}
     try:
         r = httpx.get("https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol",
@@ -454,7 +455,7 @@ def _cnbc_yields() -> dict:
             try:
                 last = float(str(d.get("last", "")).rstrip("%"))
             except ValueError:
-                continue
+                raise ValueError(f"CNBC {ten} yield unreadable") from None
             try:
                 chg = round(float(d.get("change")), 3)
             except (TypeError, ValueError):
@@ -462,33 +463,34 @@ def _cnbc_yields() -> dict:
             out[ten] = {"last": round(last, 3), "chg": chg,
                         "time": d.get("last_time"), "status": d.get("curmktstatus")}
         return out
-    except Exception:
-        return {}
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(f"CNBC yields unavailable: {type(exc).__name__}") from None
 
 
 def _yahoo_chart_yields() -> dict:
     """LIVE-ish fallback via Yahoo's v8 chart endpoint for the CBOE yield indices.
-    No 2Y. {tenor: {last, chg}} or {} on failure."""
+    No 2Y. Request/parse errors stop the run."""
     out = {}
     for sym, ten in [("%5EFVX", "5Y"), ("%5ETNX", "10Y"), ("%5ETYX", "30Y")]:
         try:
             r = httpx.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
                           params={"range": "1d", "interval": "1m", "includePrePost": "true"},
                           headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+            r.raise_for_status()
             m = r.json()["chart"]["result"][0]["meta"]
             px = m.get("regularMarketPrice")
             pc = m.get("chartPreviousClose") or m.get("previousClose")
             if px is not None:
                 out[ten] = {"last": round(px, 3),
                             "chg": round(px - pc, 3) if pc else None}
-        except Exception:
-            pass
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
+            raise RuntimeError(f"Yahoo {ten} yield unavailable: {type(exc).__name__}") from None
     return out
 
 
 def live_yields(today: dt.date) -> dict:
     """Most-current LIVE yields: CNBC benchmark UST -> Yahoo intraday index. {} if
-    both fail (caller falls back to the EOD par-curve chain). `chg` = move vs prior close."""
+    both return empty (caller falls back to EOD). Errors stop the run. `chg` = move vs prior close."""
     c = _cnbc_yields()
     if c:
         times = [v["time"] for v in c.values() if v.get("time")]
@@ -531,7 +533,7 @@ def _cnbc_vol() -> dict:
             try:
                 last = float(str(d.get("last", "")).rstrip("%"))
             except ValueError:
-                continue
+                raise ValueError(f"CNBC {key} volatility unreadable") from None
             ch = str(d.get("change", "")).strip().upper()
             if ch in ("UNCH", "", "N/A"):
                 chg = 0.0 if ch == "UNCH" else None
@@ -544,18 +546,19 @@ def _cnbc_vol() -> dict:
             out[key] = {"last": round(last, 2), "chg": chg, "last_date": (lt[:10] or None),
                         "status": d.get("curmktstatus"), "source": "CNBC", "label": VOL_TICKERS[key]}
         return out
-    except Exception:
-        return {}
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(f"CNBC volatility unavailable: {type(exc).__name__}") from None
 
 
 def _yahoo_vol() -> dict:
-    """Fallback live-ish vol via Yahoo v8 chart. {'^VIX': {...}, '^VIX9D': {...}} or {}."""
+    """Fallback live-ish vol via Yahoo v8 chart. Request/parse errors stop the run."""
     out = {}
     for sym, key in [("%5EVIX", "^VIX"), ("%5EVIX9D", "^VIX9D")]:
         try:
             r = httpx.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
                           params={"range": "5d", "interval": "1d", "includePrePost": "true"},
                           headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+            r.raise_for_status()
             res = r.json()["chart"]["result"][0]
             px = res["meta"].get("regularMarketPrice")
             closes = [c for c in (res.get("indicators", {}).get("quote", [{}])[0].get("close") or [])
@@ -564,22 +567,22 @@ def _yahoo_vol() -> dict:
             if px is not None:
                 out[key] = {"last": round(px, 2), "chg": round(px - prev, 2) if prev else None,
                             "last_date": None, "source": "Yahoo(intraday)", "label": VOL_TICKERS[key]}
-        except Exception:
-            pass
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
+            raise RuntimeError(f"Yahoo {key} volatility unavailable: {type(exc).__name__}") from None
     return out
 
 
 def _cboe_index(symbol: str, tail: int = CBOE_LOOKBACK + 5) -> list[tuple[str, float]]:
-    """(date, close) rows for one Cboe vol index, oldest first. [] on any failure.
+    """(date, close) rows for one Cboe vol index, oldest first. Request errors stop the run.
 
-    Dates arrive MM/DD/YYYY and leave ISO. Malformed lines are dropped rather than guessed.
+    Dates arrive MM/DD/YYYY and leave ISO. Malformed lines stop the run rather than being guessed.
     """
     try:
         r = httpx.get(CBOE_INDEX_CSV.format(symbol=symbol),
                       headers={"User-Agent": "Mozilla/5.0"}, timeout=25)
         r.raise_for_status()
-    except Exception:
-        return []
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Cboe {symbol} unavailable: {type(exc).__name__}") from None
     rows = []
     rd = csv.reader(io.StringIO(r.text))
     try:
@@ -592,8 +595,8 @@ def _cboe_index(symbol: str, tail: int = CBOE_LOOKBACK + 5) -> list[tuple[str, f
         try:
             d = dt.datetime.strptime(rec[0].strip(), "%m/%d/%Y").date().isoformat()
             rows.append((d, float(rec[ci])))
-        except (IndexError, TypeError, ValueError):
-            continue
+        except (IndexError, TypeError, ValueError) as exc:
+            raise ValueError(f"Cboe {symbol} history unreadable: {type(exc).__name__}") from None
     rows.sort()
     return rows[-tail:] if tail else rows
 
@@ -817,11 +820,13 @@ def sector_rotation() -> dict:
 
     bench = pull_daily(ROTATION_BENCH)
     b1, b5 = bench.get("chg_pct"), ret5(bench)
+    if "error" in bench or b1 is None or b5 is None:
+        return {"error": f"SPY benchmark unavailable: {bench.get('error') or 'insufficient closes'}"}
     rows = []
     for t, lbl in {**SECTOR_ETFS, **THEME_ETFS}.items():
         d = pull_daily(t)
         if "error" in d or d.get("chg_pct") is None:
-            continue
+            return {"error": f"{t} unavailable: {d.get('error') or 'missing daily change'}"}
         r1, r5 = d["chg_pct"], ret5(d)
         rows.append({
             "etf": t, "label": lbl, "chg_1d": r1, "chg_5d": r5,
@@ -896,7 +901,7 @@ def _chains_parallel(symbol: str, expirations, workers: int = 8) -> tuple[dict, 
         for fut, e in futs.items():
             try:
                 rows = fut.result()
-            except Exception:
+            except (httpx.HTTPError, ValueError, KeyError, TypeError):
                 failed.append(e)
                 continue
             if rows:
@@ -1143,8 +1148,8 @@ def gex_tradier(today: dt.date) -> dict:
                     | {"n_expirations": len(exps), "last_expiration": exps[-1]},
             }
             out[sym] = res
-        except Exception as e:
-            out[sym] = {"error": repr(e)}
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as e:
+            out[sym] = {"error": f"gamma read unavailable: {type(e).__name__}"}
     return out
 
 
@@ -1164,22 +1169,26 @@ def event_gate(today: dt.date, horizon_days: int = 21) -> dict:
         return {"error": "no t1 calendar"}
     try:
         return _event_gate(today, horizon_days)
-    except Exception as e:
+    except (OSError, yaml.YAMLError, ValueError, TypeError) as e:
         # Outer net. This section is the only one that could ever take the WHOLE run
         # down: gather() raises before writing anything, so a single typo in the YAML
         # cost the entire morning — no data block, no brief, and the futures/GEX/news
         # calls never even ran. Measured: 5 of 7 realistic typos did exactly that
         # (13th month, day 32, unpadded date, a one-space indent slip, a stray tab).
-        # Every other section fails soft and returns {"error": ...}; now so does this one.
+        # Expected calendar failures carry an explicit error; programming errors propagate.
         return {"error": f"event calendar unreadable: {e!r}"}
 
 
 def _event_gate(today: dt.date, horizon_days: int) -> dict:
-    cal = yaml.safe_load(T1_CALENDAR.read_text(encoding="utf-8")) or {}
+    cal = yaml.safe_load(T1_CALENDAR.read_text(encoding="utf-8"))
+    if not isinstance(cal, dict):
+        raise TypeError("event calendar must be a mapping")
     malformed: list[str] = []
 
     def _window(key: str, default_verified) -> list:
         rows = []
+        if not isinstance(cal.get(key, []), list):
+            raise TypeError(f"{key} must be a list")
         for i, e in enumerate(cal.get(key, []) or []):
             # Per-entry guard: one bad row costs that ONE event, not the calendar.
             try:
@@ -1198,7 +1207,7 @@ def _event_gate(today: dt.date, horizon_days: int) -> dict:
                 # day the event drifts inside 21 days. Measured on a 2026-08-26 entry —
                 # fine on 08-04, dead from 08-05.
                 name = e["name"]
-            except Exception as ex:
+            except (KeyError, TypeError, ValueError) as ex:
                 malformed.append(f"{key}[{i}]: {ex!r}")
                 continue
             delta = (d - today).days
@@ -1250,14 +1259,15 @@ def finnhub_news(key: str) -> dict:
         r = httpx.get("https://finnhub.io/api/v1/news",
                       params={"category": "general", "token": key}, timeout=25)
         out["status"] = r.status_code
+        r.raise_for_status()
         items = clean(r.json()) if r.status_code == 200 else []
         items.sort(key=lambda x: x["dt"] or "", reverse=True)
         items.sort(key=lambda x: not x["trusted"])  # stable: trusted block first
         out["general"] = items[:14]
         themed = [x for x in items if any(k in x["headline"].lower() for k in THEME_KEYWORDS)]
         out["themed"] = themed[:12]
-    except Exception as e:
-        out["error"] = repr(e)
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, OverflowError) as e:
+        out["error"] = f"headlines unavailable: {type(e).__name__}"
     return out
 
 
@@ -1302,8 +1312,8 @@ def _bn(x) -> str:
     """Human-scale a raw GEX figure (they run to the billions) with a sign."""
     try:
         return f"{x / 1e9:+.2f}bn"
-    except Exception:
-        return "na"
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Gamma total unreadable: {type(exc).__name__}") from None
 
 
 def render_md(d: dict) -> str:
@@ -1373,6 +1383,8 @@ def render_md(d: dict) -> str:
     if "error" not in ni:
         L.append(f"- NQ intraday: last {ni.get('last_px')} @ {ni.get('last_ts_et')}; "
                  f"gap vs prior close {ni.get('gap')}; overnight range {ni.get('overnight_range')}")
+    else:
+        L.append(f"- NQ intraday: UNAVAILABLE — {ni['error']}")
 
     L.append("\n## Macro pulse (moves, not levels)")
     mp = d["macro_pulse"]
@@ -1401,6 +1413,8 @@ def render_md(d: dict) -> str:
         if "error" not in v:
             L.append(f"- {v.get('label')} ({t}): {v.get('last')}  chg {v.get('chg')}  "
                      f"[{v.get('last_date')}] ({v.get('source', '?')})")
+        else:
+            L.append(f"- {t}: UNAVAILABLE — {v['error']}")
     off = mp.get("vol_official")
     if off:
         lv = off.get("levels", {})
@@ -1459,6 +1473,9 @@ def render_md(d: dict) -> str:
                 L.append(f"- {lbl}: ⚠️ MISMATCH — VERIFY BEFORE PUBLISHING: " + "; ".join(bad))
 
     sr = d.get("sector_rotation", {})
+    if "error" in sr or not sr.get("ranked"):
+        L.append("\n## Sector rotation (ETF rel-perf vs SPY — LIVE yfinance)")
+        L.append(f"- Sector rotation: UNAVAILABLE — {sr.get('error') or 'no usable ETF returns'}")
     if sr and "error" not in sr and sr.get("ranked"):
         f = lambda x: f"{x:+.2f}" if isinstance(x, (int, float)) else " na "
         b = sr["bench"]
@@ -1523,6 +1540,8 @@ def render_md(d: dict) -> str:
 
     L.append("\n## Finnhub headlines")
     fh = d["finnhub"]
+    if fh.get("error"):
+        L.append(f"- Finnhub headlines: UNAVAILABLE — {fh['error']}")
     L.append(f"- status: {fh.get('status')}")
     L.append("- GENERAL (trusted-first):")
     for x in fh.get("general", [])[:12]:
@@ -1562,10 +1581,8 @@ def _archive_previous_run(date: str) -> str | None:
     try:
         stamp = dt.datetime.fromisoformat(
             json.loads(j.read_text(encoding="utf-8"))["as_of"]).strftime("%H%M")
-    except Exception:
-        # Same reason as `as_of` above: mtime is local, so convert to ET before naming.
-        stamp = pd.Timestamp(j.stat().st_mtime, unit="s", tz="UTC").tz_convert(
-            "America/New_York").strftime("%H%M")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(f"Previous data block cannot be archived safely: {type(exc).__name__}") from None
     runs = DATA_DIR / "runs"
     runs.mkdir(parents=True, exist_ok=True)
     j.replace(runs / f"{date}-{stamp}.json")
