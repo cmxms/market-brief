@@ -63,14 +63,14 @@ def test_failed_section_is_visible(block, marker):
     (lambda: G._cboe_index("VIX"), "Cboe VIX"),
 ])
 @pytest.mark.parametrize("failure", ["timeout", "http"])
-def test_required_source_failure_stops_gather(monkeypatch, operation, label, failure):
+def test_source_failure_is_typed_for_chain_fallback(monkeypatch, operation, label, failure):
     monkeypatch.setattr(G, "_fred_key", lambda: "synthetic")
     if failure == "timeout":
         monkeypatch.setattr(httpx, "get", Mock(side_effect=httpx.ReadTimeout("synthetic request detail")))
     else:
         response = httpx.Response(503, request=httpx.Request("GET", "https://example.invalid"))
         monkeypatch.setattr(httpx, "get", Mock(return_value=response))
-    with pytest.raises(RuntimeError) as caught:
+    with pytest.raises(G.SourceUnavailable) as caught:
         operation()
     assert str(caught.value).startswith(f"{label} unavailable")
     assert "synthetic request detail" not in str(caught.value)
@@ -290,3 +290,171 @@ def test_unexpected_fanout_error_propagates(monkeypatch, tmp_path, image):
         else:
             monkeypatch.setattr(P, "_post_one", failure)
             P.post("brief", webhook="https://example.invalid")
+
+
+@pytest.mark.parametrize("failure", [httpx.ReadTimeout("private detail"), ValueError("bad CSV")])
+def test_treasury_primary_failure_uses_fred(monkeypatch, failure):
+    monkeypatch.setattr(G, "_treasury_curve_rows", Mock(side_effect=failure))
+    monkeypatch.setattr(G, "_fred_yields", lambda: {"10Y": [("2026-11-16", 4.2),
+                                                               ("2026-11-13", 4.1)]})
+    result = G.treasury_yields(TODAY)
+    assert result["source"] == "FRED (DGS series)"
+    assert result["tenors"]["10Y"]["last"] == 4.2
+    assert result["last_date"] == "2026-11-16"
+    assert result["failures"][0][0] == "US Treasury par yield curve"
+    assert "private detail" not in str(result)
+
+
+def test_exhausted_vol_chain_renders_every_source_failure(monkeypatch, block):
+    monkeypatch.setattr(G, "_cnbc_yields", dict)
+    monkeypatch.setattr(G, "_yahoo_chart_yields", dict)
+    monkeypatch.setattr(G, "_treasury_curve_rows", lambda _: [])
+    monkeypatch.setattr(G, "_fred_yields", dict)
+    response = httpx.Response(503, request=httpx.Request("GET", "https://example.invalid"))
+    monkeypatch.setattr(httpx, "get", Mock(return_value=response))
+    monkeypatch.setattr(G, "_cnbc_vol", Mock(side_effect=httpx.ReadTimeout("private detail")))
+    monkeypatch.setattr(G, "_yahoo_vol", Mock(side_effect=ValueError("private parse detail")))
+    monkeypatch.setattr(G, "pull_daily", lambda _: {"error": "empty"})
+    block["macro_pulse"] = G.macro_pulse(TODAY)
+    block["source_crosscheck"] = G.source_crosscheck()
+    text = G.render_md(block)
+    for marker in ["^VIX: UNAVAILABLE", "^VIX9D: UNAVAILABLE", "CNBC volatility",
+                   "timeout", "Yahoo volatility", "ValueError", "yfinance ^VIX",
+                   "empty", "Cboe VIX", "HTTP 503", "TERM STRUCTURE:",
+                   "VOL CURVE: UNAVAILABLE", "Treasury yields: UNAVAILABLE"]:
+        assert marker in text
+    assert "private detail" not in text and "private parse detail" not in text
+
+
+def test_fred_failure_reaches_yfinance(monkeypatch):
+    monkeypatch.setattr(G, "_treasury_curve_rows", lambda _: [])
+    monkeypatch.setattr(G, "_fred_yields", Mock(side_effect=httpx.ReadTimeout("private")))
+    monkeypatch.setattr(G, "pull_daily", lambda _: {"last": 4.2, "last_date": "2026-11-16"})
+    result = G.treasury_yields(TODAY)
+    assert result["source"].startswith("yfinance")
+    assert set(result["tenors"]) == {"5Y", "10Y", "30Y"}
+    assert result["failures"][1][0] == "FRED (DGS series)"
+
+
+def test_january_prior_year_error_keeps_current_row(monkeypatch):
+    monkeypatch.setattr(G, "_treasury_curve_rows", Mock(side_effect=[
+        [(dt.date(2026, 1, 2), {"10Y": 4.2})], httpx.ReadTimeout("private")]))
+    result = G.treasury_yields(dt.date(2026, 1, 5))
+    assert result["tenors"]["10Y"]["last"] == 4.2
+    assert result["tenors"]["10Y"]["prev"] is None
+    assert result["failures"][0][0] == "Treasury prior year"
+
+
+def test_live_yield_fallback_retains_source_date(monkeypatch):
+    monkeypatch.setattr(G, "_cnbc_yields", Mock(side_effect=httpx.ReadTimeout("private")))
+    monkeypatch.setattr(G, "_yahoo_chart_yields", lambda: {
+        "10Y": {"last": 4.2, "chg": 0.1, "as_of": "2026-11-16T20:00:00+00:00"}})
+    result = G.live_yields(TODAY)
+    assert result["last_date"] == "2026-11-16"
+    assert result["stale"] is True
+    assert result["source"].startswith("Yahoo")
+
+
+def test_cboe_failure_uses_relayed_term_structure(monkeypatch, block):
+    monkeypatch.setattr(G, "live_yields", lambda _: {})
+    monkeypatch.setattr(G, "treasury_yields", lambda _: {})
+    monkeypatch.setattr(G, "_cnbc_vol", lambda: {
+        "^VIX": {"last": 20.0, "chg": 1.0, "last_date": str(TODAY), "source": "CNBC"},
+        "^VIX9D": {"last": 19.0, "chg": 1.0, "last_date": str(TODAY), "source": "CNBC"}})
+    monkeypatch.setattr(G, "_cboe_index", Mock(side_effect=httpx.ReadTimeout("private")))
+    block["macro_pulse"] = G.macro_pulse(TODAY)
+    assert block["macro_pulse"]["term_structure"]["spread_9d_minus_30d"] == -1.0
+    text = G.render_md(block)
+    assert "Dated relayed/daily quotes" in text
+    assert "VOL CURVE: UNAVAILABLE" in text
+
+
+def test_cboe_settled_fallback_is_not_presented_as_live(monkeypatch, block):
+    monkeypatch.setattr(G, "live_yields", lambda _: {})
+    monkeypatch.setattr(G, "treasury_yields", lambda _: {})
+    monkeypatch.setattr(G, "_cnbc_vol", dict)
+    monkeypatch.setattr(G, "_yahoo_vol", dict)
+    monkeypatch.setattr(G, "pull_daily", lambda _: {"error": "empty"})
+    monkeypatch.setattr(G, "_cboe_index", lambda _: [("2026-11-16", 20.0)])
+    block["macro_pulse"] = G.macro_pulse(TODAY)
+    assert block["macro_pulse"]["^VIX"]["mode"] == "EOD"
+    text = G.render_md(block)
+    assert "EOD) STALE / not current" in text
+    assert "has since traded" not in text
+
+
+@pytest.mark.parametrize("operation,source", [
+    (lambda: G.treasury_yields(TODAY), "_treasury_curve_rows"),
+    (lambda: G.live_yields(TODAY), "_cnbc_yields"),
+    (lambda: G.macro_pulse(TODAY), "_cnbc_yields"),
+    (G.cboe_vol_official, "_cboe_index"),
+    (G.source_crosscheck, "_cnbc_yields"),
+])
+@pytest.mark.parametrize("failure", [RuntimeError("unexpected"), AssertionError("unexpected")])
+def test_chain_unexpected_exception_still_propagates(monkeypatch, operation, source, failure):
+    monkeypatch.setattr(G, source, Mock(side_effect=failure))
+    with pytest.raises(type(failure), match="unexpected"):
+        operation()
+
+
+def test_treasury_http_503_reaches_fred(monkeypatch):
+    response = httpx.Response(503, request=httpx.Request("GET", "https://example.invalid"))
+    monkeypatch.setattr(httpx, "get", Mock(return_value=response))
+    monkeypatch.setattr(G, "_fred_yields", lambda: {"10Y": [("2026-11-16", 4.2)]})
+    result = G.treasury_yields(TODAY)
+    assert result["source"] == "FRED (DGS series)"
+    assert "HTTP 503" in result["failures"][0][1]
+
+
+@pytest.mark.parametrize("stamp", [None, True, "yesterday", float("nan")])
+def test_missing_yahoo_time_is_not_replaced_by_host_clock(stamp):
+    with pytest.raises(ValueError, match="timestamp missing or invalid"):
+        G._yahoo_time({"regularMarketTime": stamp})
+
+
+@pytest.mark.parametrize("operation", [G._yahoo_chart_yields, G._yahoo_vol])
+def test_yahoo_quote_uses_source_timestamp_in_exchange_time(monkeypatch, operation):
+    stamp = G.pd.Timestamp("2026-11-17T01:00:00Z").timestamp()
+    response = httpx.Response(200, json={"chart": {"result": [{
+        "meta": {"regularMarketPrice": 20.0, "regularMarketTime": stamp},
+    }]}}, request=httpx.Request("GET", "https://example.invalid"))
+    monkeypatch.setattr(httpx, "get", Mock(return_value=response))
+    result = operation()
+    for value in result.values():
+        assert (value.get("as_of") or value["last_date"]).startswith("2026-11-16")
+
+
+def test_partial_vol_primary_uses_yahoo_for_missing_leg(monkeypatch):
+    monkeypatch.setattr(G, "live_yields", lambda _: {})
+    monkeypatch.setattr(G, "treasury_yields", lambda _: {})
+    monkeypatch.setattr(G, "_cnbc_vol", lambda: {
+        "^VIX": {"last": 20.0, "last_date": str(TODAY), "source": "CNBC"}})
+    monkeypatch.setattr(G, "_yahoo_vol", lambda: {
+        "^VIX9D": {"last": 19.0, "last_date": str(TODAY), "source": "Yahoo"}})
+    monkeypatch.setattr(G, "_cboe_index", lambda _: [])
+    result = G.macro_pulse(TODAY)
+    assert result["^VIX"]["source"] == "CNBC"
+    assert result["^VIX9D"]["source"] == "Yahoo"
+
+
+def test_yfinance_transport_failure_reaches_cboe(monkeypatch):
+    monkeypatch.setattr(G, "live_yields", lambda _: {})
+    monkeypatch.setattr(G, "treasury_yields", lambda _: {})
+    monkeypatch.setattr(G, "_cnbc_vol", dict)
+    monkeypatch.setattr(G, "_yahoo_vol", dict)
+    monkeypatch.setattr(G, "pull_daily", Mock(side_effect=G.YahooRequestError("private detail")))
+    monkeypatch.setattr(G, "_cboe_index", lambda _: [("2026-11-16", 20.0)])
+    result = G.macro_pulse(TODAY)
+    assert result["^VIX"]["mode"] == "EOD"
+    assert result["^VIX"]["last_date"] == "2026-11-16"
+    assert "private detail" not in str(result)
+
+
+@pytest.mark.parametrize("date", [None, "2026-11-13"])
+def test_term_structure_cannot_guess_matching_previous_close(date):
+    result = G._vol_term_structure(
+        {"last": 20.0, "chg": 1.0, "last_date": str(TODAY)},
+        {"last": 19.0, "last_date": date})
+    assert result is not None
+    assert result["aligned"] is False
+    assert result.get("spread_9d_minus_30d") is None

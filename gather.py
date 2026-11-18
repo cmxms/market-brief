@@ -39,6 +39,8 @@ import numpy as np
 import pandas as pd
 import yaml
 import yfinance as yf
+from curl_cffi.requests.exceptions import RequestException as YahooRequestError
+from yfinance.exceptions import YFDataException, YFRateLimitError, YFTickerMissingError
 
 # Windows consoles default to cp1252, which can't encode the ★/→/— glyphs in the
 # rendered block -> print() would crash AFTER the files are already written.
@@ -175,6 +177,47 @@ THEME_KEYWORDS = [
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+class SourceUnavailable(RuntimeError):
+    """An expected source failure, safe to report and eligible for fallback."""
+
+
+def _failure_reason(exc: Exception) -> str:
+    # Never stringify transport exceptions: URLs can contain credentials.
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    if isinstance(exc, httpx.TimeoutException):
+        return f"timeout ({type(exc).__name__})"
+    if isinstance(exc, SourceUnavailable):
+        return str(exc)
+    return type(exc).__name__
+
+
+def _attempt(source: str, fetch, failures: list):
+    """Retain expected failures without hiding unrelated RuntimeErrors or assertions."""
+    try:
+        value = fetch()
+    except (SourceUnavailable, httpx.HTTPError, YahooRequestError, YFDataException,
+            YFRateLimitError, YFTickerMissingError, ValueError, KeyError, TypeError,
+            IndexError, OverflowError, csv.Error) as exc:
+        failures.append((source, _failure_reason(exc)))
+        return {}
+    if not value or (isinstance(value, dict) and value.get("error")):
+        failures.append((source, value.get("error") if value else "empty"))
+        return {}
+    return value
+
+
+def _unavailable(section: str, failures: list) -> str:
+    return f"{section} unavailable: " + ", ".join(f"{s} ({r})" for s, r in failures)
+
+
+def _yahoo_time(meta: dict) -> str:
+    stamp = meta["regularMarketTime"]
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)) or not np.isfinite(stamp):
+        raise ValueError("Yahoo quote timestamp missing or invalid")
+    return pd.Timestamp(stamp, unit="s", tz="UTC").tz_convert("America/New_York").isoformat()
+
+
 def _close_series(h: pd.DataFrame) -> pd.Series:
     c = h["Close"]
     c = c.iloc[:, 0] if hasattr(c, "columns") else c
@@ -329,7 +372,7 @@ def _weekdays_behind(last_date: dt.date, today: dt.date) -> int:
 
 def _treasury_curve_rows(year: int) -> list:
     """[(date, {tenor: float}), ...] newest-first from the US Treasury Daily Par
-    Yield Curve CSV. Empty data permits fallback; request/parse errors stop the run."""
+    Yield Curve CSV. Empty data and expected failures permit fallback."""
     url = ("https://home.treasury.gov/resource-center/data-chart-center/"
            f"interest-rates/daily-treasury-rates.csv/{year}/all")
     try:
@@ -356,14 +399,14 @@ def _treasury_curve_rows(year: int) -> list:
         rows.sort(key=lambda x: x[0], reverse=True)
         return rows
     except (httpx.HTTPError, ValueError, csv.Error) as exc:
-        raise RuntimeError(f"Treasury curve unavailable: {type(exc).__name__}") from None
+        raise SourceUnavailable(f"Treasury curve unavailable: {_failure_reason(exc)}") from None
 
 
 def _fred_yields() -> dict:
-    """{tenor: [(date, value), ...newest-first]} from FRED. Errors stop the run."""
+    """{tenor: [(date, value), ...newest-first]} from FRED; expected errors permit fallback."""
     key = _fred_key()
     if not key:
-        return {}
+        raise SourceUnavailable("FRED unavailable: no FRED_API_KEY")
     out = {}
     for ten, sid in _FRED_SID.items():
         try:
@@ -376,7 +419,7 @@ def _fred_yields() -> dict:
             if obs:
                 out[ten] = obs
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
-            raise RuntimeError(f"FRED {ten} unavailable: {type(exc).__name__}") from None
+            raise SourceUnavailable(f"FRED {ten} unavailable: {_failure_reason(exc)}") from None
     return out
 
 
@@ -384,46 +427,62 @@ def treasury_yields(today: dt.date) -> dict:
     """Most-current EOD Treasury yields with a source chain:
     US Treasury par-yield API -> FRED -> yfinance. Always carries the as-of date,
     source, and a staleness flag."""
-    tenors, source, last_date = {}, None, None
+    failures = []
 
-    rows = _treasury_curve_rows(today.year)
-    if len(rows) < 2 and today.month == 1:
-        rows = (rows + _treasury_curve_rows(today.year - 1))
-        rows.sort(key=lambda x: x[0], reverse=True)
-    if rows:
-        last_date, last_vals = rows[0]
-        prev_vals = rows[1][1] if len(rows) > 1 else {}
-        for ten in YIELD_TENORS:
-            if ten in last_vals:
-                p = prev_vals.get(ten)
-                tenors[ten] = {"last": round(last_vals[ten], 3),
-                               "prev": round(p, 3) if p is not None else None,
-                               "chg": round(last_vals[ten] - p, 3) if p is not None else None}
-        source = "US Treasury par yield curve"
+    def treasury():
+        rows = _treasury_curve_rows(today.year)
+        if len(rows) < 2 and today.month == 1:
+            rows += (_attempt("Treasury prior year",
+                              lambda: _treasury_curve_rows(today.year - 1), failures) or [])
+            rows.sort(key=lambda x: x[0], reverse=True)
+        out = {}
+        if rows:
+            date, vals = rows[0]
+            prev = rows[1][1] if len(rows) > 1 else {}
+            for ten in YIELD_TENORS:
+                if ten in vals:
+                    p = prev.get(ten)
+                    out[ten] = {"last": round(vals[ten], 3), "prev": p,
+                                "chg": round(vals[ten] - p, 3) if p is not None else None,
+                                "last_date": date.isoformat()}
+        return out
 
-    if not tenors:
-        fred = _fred_yields()
-        for ten, obs in fred.items():
+    def fred():
+        out = {}
+        for ten, obs in _fred_yields().items():
             last = obs[0]
-            prev = obs[1] if len(obs) > 1 else None
-            tenors[ten] = {"last": round(last[1], 3),
-                           "prev": round(prev[1], 3) if prev else None,
-                           "chg": round(last[1] - prev[1], 3) if prev else None}
-            d = dt.datetime.strptime(last[0], "%Y-%m-%d").date()
-            last_date = max(last_date, d) if last_date else d
-        if tenors:
-            source = "FRED (DGS series)"
+            date = dt.date.fromisoformat(last[0])
+            prev = obs[1][1] if len(obs) > 1 else None
+            out[ten] = {"last": round(last[1], 3), "prev": prev,
+                        "chg": round(last[1] - prev, 3) if prev is not None else None,
+                        "last_date": date.isoformat()}
+        return out
 
-    if not tenors:
+    def yahoo():
+        out = {}
         for ten, sym in _YF_YIELD.items():
-            d = pull_daily(sym)
-            if "error" not in d:
-                tenors[ten] = {"last": d.get("last"), "prev": d.get("prev_close"),
-                               "chg": d.get("chg")}
-                ld = dt.date.fromisoformat(d["last_date"])
-                last_date = max(last_date, ld) if last_date else ld
+            def fetch(sym=sym):
+                d = pull_daily(sym)
+                if "error" in d:
+                    return d
+                return {"last": d["last"], "prev": d.get("prev_close"),
+                        "chg": d.get("chg"),
+                        "last_date": dt.date.fromisoformat(d["last_date"]).isoformat()}
+            d = _attempt(f"yfinance {sym}", fetch, failures)
+            if d:
+                out[ten] = d
+        return out
+
+    tenors, source = {}, None
+    for name, fetch in [("US Treasury par yield curve", treasury),
+                        ("FRED (DGS series)", fred),
+                        ("yfinance (^TNX/^TYX/^FVX proxy)", yahoo)]:
+        tenors = _attempt(name, fetch, failures)
         if tenors:
-            source = "yfinance (^TNX/^TYX/^FVX proxy)"
+            source = name
+            break
+    # Use the oldest leg as the aggregate freshness stamp; each tenor retains its date.
+    last_date = min((dt.date.fromisoformat(v["last_date"]) for v in tenors.values()), default=None)
 
     behind = _weekdays_behind(last_date, today) if last_date else None
     return {
@@ -434,12 +493,14 @@ def treasury_yields(today: dt.date) -> dict:
         "as_of": str(last_date) if last_date else None,
         "weekdays_behind": behind,
         "stale": bool(behind and behind >= 1),
+        "failures": failures,
+        "error": _unavailable("Yields", failures) if not tenors else None,
     }
 
 
 def _cnbc_yields() -> dict:
     """LIVE benchmark UST yields from CNBC's quote webservice (the actual cash yield,
-    not the CBOE index). Request/parse errors stop the run."""
+    not the CBOE index). Expected request/parse failures permit fallback."""
     sym_map = {"US2Y": "2Y", "US5Y": "5Y", "US10Y": "10Y", "US30Y": "30Y"}
     try:
         r = httpx.get("https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol",
@@ -464,12 +525,12 @@ def _cnbc_yields() -> dict:
                         "time": d.get("last_time"), "status": d.get("curmktstatus")}
         return out
     except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
-        raise RuntimeError(f"CNBC yields unavailable: {type(exc).__name__}") from None
+        raise SourceUnavailable(f"CNBC yields unavailable: {_failure_reason(exc)}") from None
 
 
 def _yahoo_chart_yields() -> dict:
     """LIVE-ish fallback via Yahoo's v8 chart endpoint for the CBOE yield indices.
-    No 2Y. Request/parse errors stop the run."""
+    No 2Y. Source timestamps are retained; expected errors permit fallback."""
     out = {}
     for sym, ten in [("%5EFVX", "5Y"), ("%5ETNX", "10Y"), ("%5ETYX", "30Y")]:
         try:
@@ -482,19 +543,20 @@ def _yahoo_chart_yields() -> dict:
             pc = m.get("chartPreviousClose") or m.get("previousClose")
             if px is not None:
                 out[ten] = {"last": round(px, 3),
-                            "chg": round(px - pc, 3) if pc else None}
-        except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
-            raise RuntimeError(f"Yahoo {ten} yield unavailable: {type(exc).__name__}") from None
+                            "chg": round(px - pc, 3) if pc else None,
+                            "as_of": _yahoo_time(m)}
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError, OverflowError) as exc:
+            raise SourceUnavailable(f"Yahoo {ten} yield unavailable: {_failure_reason(exc)}") from None
     return out
 
 
 def live_yields(today: dt.date) -> dict:
-    """Most-current LIVE yields: CNBC benchmark UST -> Yahoo intraday index. {} if
-    both return empty (caller falls back to EOD). Errors stop the run. `chg` = move vs prior close."""
-    c = _cnbc_yields()
+    """CNBC -> Yahoo intraday; caller can use an explicitly labelled EOD fallback."""
+    failures = []
+    c = _attempt("CNBC yields", _cnbc_yields, failures)
     if c:
         times = [v["time"] for v in c.values() if v.get("time")]
-        as_of = max(times) if times else None
+        as_of = min(times) if len(times) == len(c) else None
         as_of_date = as_of[:10] if as_of else None
         status = next((v.get("status") for v in c.values() if v.get("status")), None)
         return {
@@ -502,17 +564,20 @@ def live_yields(today: dt.date) -> dict:
             "source": "CNBC (UST benchmark, intraday)",
             "tenors": {t: {"last": v["last"], "chg": v["chg"]} for t, v in c.items()},
             "as_of": as_of, "last_date": as_of_date, "market_status": status,
-            "stale": bool(as_of_date and as_of_date < str(today)),
+            "stale": not as_of_date or as_of_date < str(today), "failures": failures,
         }
-    y = _yahoo_chart_yields()
+    y = _attempt("Yahoo yields", _yahoo_chart_yields, failures)
     if y:
+        times = [v.get("as_of") for v in y.values() if v.get("as_of")]
+        as_of = min(times) if times else None
         return {
             "mode": "LIVE",
             "source": "Yahoo ^TNX/^TYX/^FVX (intraday)",
-            "tenors": y, "as_of": None, "last_date": str(today),
-            "market_status": None, "stale": False,
+            "tenors": y, "as_of": as_of, "last_date": as_of[:10] if as_of else None,
+            "market_status": None, "stale": not as_of or as_of[:10] < str(today),
+            "failures": failures,
         }
-    return {}
+    return {"failures": failures, "error": _unavailable("Live yields", failures)}
 
 
 def _cnbc_vol() -> dict:
@@ -547,11 +612,11 @@ def _cnbc_vol() -> dict:
                         "status": d.get("curmktstatus"), "source": "CNBC", "label": VOL_TICKERS[key]}
         return out
     except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
-        raise RuntimeError(f"CNBC volatility unavailable: {type(exc).__name__}") from None
+        raise SourceUnavailable(f"CNBC volatility unavailable: {_failure_reason(exc)}") from None
 
 
 def _yahoo_vol() -> dict:
-    """Fallback live-ish vol via Yahoo v8 chart. Request/parse errors stop the run."""
+    """Fallback live-ish vol via Yahoo v8 chart, retaining the source date."""
     out = {}
     for sym, key in [("%5EVIX", "^VIX"), ("%5EVIX9D", "^VIX9D")]:
         try:
@@ -566,9 +631,10 @@ def _yahoo_vol() -> dict:
             prev = closes[-2] if len(closes) >= 2 else None
             if px is not None:
                 out[key] = {"last": round(px, 2), "chg": round(px - prev, 2) if prev else None,
-                            "last_date": None, "source": "Yahoo(intraday)", "label": VOL_TICKERS[key]}
-        except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
-            raise RuntimeError(f"Yahoo {key} volatility unavailable: {type(exc).__name__}") from None
+                            "last_date": _yahoo_time(res["meta"])[:10],
+                            "source": "Yahoo(intraday)", "label": VOL_TICKERS[key]}
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError, OverflowError) as exc:
+            raise SourceUnavailable(f"Yahoo {key} volatility unavailable: {_failure_reason(exc)}") from None
     return out
 
 
@@ -582,7 +648,7 @@ def _cboe_index(symbol: str, tail: int = CBOE_LOOKBACK + 5) -> list[tuple[str, f
                       headers={"User-Agent": "Mozilla/5.0"}, timeout=25)
         r.raise_for_status()
     except httpx.HTTPError as exc:
-        raise RuntimeError(f"Cboe {symbol} unavailable: {type(exc).__name__}") from None
+        raise SourceUnavailable(f"Cboe {symbol} unavailable: {_failure_reason(exc)}") from None
     rows = []
     rd = csv.reader(io.StringIO(r.text))
     try:
@@ -609,12 +675,14 @@ def cboe_vol_official() -> dict:
 
     🔑 **All four legs come from the same CSV family and carry their own date**, so the
     VIX9D-vs-VIX alignment problem that `_vol_term_structure` has to work around cannot occur
-    here: `aligned` is a direct fact, not a reconstruction. Returns {} if VIX itself fails —
-    a curve without its anchor is not worth half-reporting.
+    here: `aligned` is a direct fact, not a reconstruction. Reports an error if VIX itself
+    fails; a curve without its anchor is not worth half-reporting.
     """
-    series = {s: _cboe_index(s) for s in CBOE_INDICES}
+    failures = []
+    series = {s: _attempt(f"Cboe {s}", lambda s=s: _cboe_index(s), failures)
+              for s in CBOE_INDICES}
     if not series.get("VIX"):
-        return {}
+        return {"error": _unavailable("Cboe curve", failures), "failures": failures}
 
     levels, dates = {}, []
     for sym, rows in series.items():
@@ -632,6 +700,7 @@ def cboe_vol_official() -> dict:
         "levels": levels,
         "aligned": len(set(dates)) == 1,
         "missing": [s for s in CBOE_INDICES if s not in levels],
+        "failures": failures,
     }
 
     vix = levels["VIX"]["last"]
@@ -676,9 +745,13 @@ def _compare_sources(primary: dict, fallback: dict, tol: float) -> dict:
 def source_crosscheck() -> dict:
     """Each morning, confirm CNBC (primary) and Yahoo v8 (fallback) AGREE on the live
     numbers — a mismatch flags a bad feed before it reaches the brief."""
-    cy, yy = _cnbc_yields(), _yahoo_chart_yields()
-    cv, yv = _cnbc_vol(), _yahoo_vol()
+    failures = []
+    cy = _attempt("CNBC yields", _cnbc_yields, failures)
+    yy = _attempt("Yahoo yields", _yahoo_chart_yields, failures)
+    cv = _attempt("CNBC volatility", _cnbc_vol, failures)
+    yv = _attempt("Yahoo volatility", _yahoo_vol, failures)
     return {
+        "failures": failures,
         "yields": _compare_sources({k: v["last"] for k, v in cy.items()},
                                    {k: v["last"] for k, v in yy.items()}, tol=0.03),
         "vol": _compare_sources({k: v["last"] for k, v in cv.items()},
@@ -699,11 +772,8 @@ def _vol_term_structure(vix: dict, vix9d: dict) -> dict | None:
     (7/30) minus VIX9D 20.38 (7/29). Aligned at the 7/29 close, VIX was 20.66 and
     the spread is -0.28: contango.
 
-    So: when both legs share a date, report the live spread. When they don't, report
-    the spread at the last session BOTH legs closed on — VIX's close for that session
-    is recoverable as `last - chg`, and VIX9D's `last` already IS that close — and
-    carry the live VIX move separately. `spread_9d_minus_30d` is always the number
-    that is safe to quote; the unaligned figure is kept only for transparency.
+    Report a spread only when both legs share a known source date. A change-on-day
+    does not identify the previous close's date; it cannot align a stale leg safely.
     """
     v, v9 = vix.get("last"), vix9d.get("last")
     if v is None or v9 is None:
@@ -717,56 +787,61 @@ def _vol_term_structure(vix: dict, vix9d: dict) -> dict | None:
     ts = {"vix": v, "vix9d": v9, "vix_date": vd, "vix9d_date": v9d,
           "mixed_dates": bool(vd and v9d and vd != v9d)}
 
+    if not vd or not v9d:
+        return {**ts, "aligned": False, "mixed_dates": True,
+                "note": "Source dates missing; no same-moment term structure available."}
+
     if not ts["mixed_dates"]:
         ts |= {"as_of": vd, "aligned": True, "spread_9d_minus_30d": round(v9 - v, 2),
                "state": _state(v9 - v)}
         return ts
 
-    chg = vix.get("chg")
-    if chg is None:
-        # Can't recover VIX's prior close, so there is no honest comparison to make.
-        ts |= {"as_of": None, "aligned": False, "spread_9d_minus_30d": None, "state": None,
-               "note": (f"VIX is {vd} and VIX9D is {v9d} — different sessions, and VIX's "
-                        f"change-on-day is missing so the two cannot be aligned. "
-                        f"DO NOT quote a term structure from this block.")}
-        return ts
-
-    v_close = round(v - chg, 2)
-    spread = round(v9 - v_close, 2)
-    ts |= {"as_of": v9d, "aligned": True,
-           "vix_at_that_close": v_close,
-           "spread_9d_minus_30d": spread,
-           "state": _state(spread),
-           "vix_live": v, "vix_live_chg": chg,
-           "spread_raw_unaligned": round(v9 - v, 2),
-           "note": (f"VIX9D last recomputed {v9d}; VIX is live {vd}. Spread is taken at "
-                    f"the {v9d} close (VIX {v_close} vs VIX9D {v9}) — a real same-moment "
-                    f"reading. VIX has since moved to {v} ({chg:+}). The unaligned "
-                    f"live-minus-stale figure would read {round(v9 - v, 2):+} — not quotable.")}
+    ts |= {"as_of": None, "aligned": False, "spread_9d_minus_30d": None, "state": None,
+           "note": f"VIX is {vd} and VIX9D is {v9d}; no verified same-session close pair."}
     return ts
 
 
 def macro_pulse(today: dt.date | None = None) -> dict:
-    today = today or dt.datetime.now().date()
+    today = today or pd.Timestamp.now(tz="America/New_York").date()
     live = live_yields(today)
     eod = treasury_yields(today)
     out = {"yields": live if live.get("tenors") else eod, "yields_eod_close": eod}
-    vol = _cnbc_vol() or _yahoo_vol()
+    out["failures"] = live.get("failures", []) + eod.get("failures", [])
+    if not live.get("tenors") and not eod.get("tenors"):
+        out["yields"] = {**eod, "error": _unavailable("Yields", out["failures"])}
+    vol_failures = []
+    cnbc = _attempt("CNBC volatility", _cnbc_vol, vol_failures)
+    need_yahoo = any(not cnbc.get(t) for t in VOL_TICKERS)
+    yahoo = _attempt("Yahoo volatility", _yahoo_vol, vol_failures) if need_yahoo else {}
+    official = cboe_vol_official()
+    out["vol_official"] = official
     for t, lbl in VOL_TICKERS.items():
-        d = vol.get(t)
+        failures = list(vol_failures)
+        d = cnbc.get(t) or yahoo.get(t)
+        for name, values in [("CNBC", cnbc), ("Yahoo", yahoo)]:
+            if values and not values.get(t):
+                failures.append((f"{name} {t}", "empty"))
         if not d or d.get("last") is None:
-            d = pull_daily(t)
-            d["label"] = lbl
-            d["source"] = "yfinance(daily)"
-        out[t] = d
+            d = _attempt(f"yfinance {t}", lambda t=t: pull_daily(t), failures)
+            if d:
+                d = {**d, "label": lbl, "source": "yfinance(daily)", "mode": "EOD"}
+        if not d:
+            level = official.get("levels", {}).get(t.lstrip("^"))
+            if level:
+                d = {**level, "last_date": level["date"], "source": official["source"],
+                     "mode": "EOD"}
+            else:
+                failures.extend(official.get("failures", []))
+                failures.append((f"Cboe {t}", "no settled level"))
+        if d:
+            d = {**d, "stale": not d.get("last_date") or d["last_date"] < str(today)}
+        out[t] = d or {"error": _unavailable(t, failures)}
+        out["failures"].extend(failures)
 
     # The term structure comes from Cboe's OWN closes when they are available: all legs are
     # from one publisher and one session, so the VIX9D-vs-VIX alignment problem below cannot
     # arise. The CNBC/Yahoo legs stay because Cboe publishes after the close and this brief is
     # pre-open — they carry the live move, which Cboe cannot.
-    official = cboe_vol_official()
-    if official:
-        out["vol_official"] = official
     live_ts = _vol_term_structure(out.get("^VIX") or {}, out.get("^VIX9D") or {})
 
     if official and official.get("aligned") and official.get("spread_9d_minus_30d") is not None:
@@ -792,7 +867,9 @@ def macro_pulse(today: dt.date | None = None) -> dict:
             "backwardation_share_pct": official.get("backwardation_share_pct"),
             "lookback_sessions": official.get("lookback_sessions"),
         }
-        if vix_live is not None and vix_live != vix_close:
+        if (vix_live is not None and vix_live != vix_close
+                and out.get("^VIX", {}).get("mode") != "EOD"
+                and not out.get("^VIX", {}).get("stale")):
             ts["vix_live"] = vix_live
             ts["vix_live_chg"] = (out.get("^VIX") or {}).get("chg")
             ts["note"] = (f"Term structure is Cboe's OFFICIAL {official['as_of']} close, all "
@@ -804,9 +881,12 @@ def macro_pulse(today: dt.date | None = None) -> dict:
             ts["relayed_reading"] = live_ts
         out["term_structure"] = ts
     elif live_ts:
-        # Cboe unreachable or legs unaligned — fall back to the reconstructed CNBC reading.
-        live_ts["source"] = "CNBC/Yahoo (relayed) — Cboe official unavailable"
+        # Cboe unreachable or unaligned: only dated, aligned relay/daily pairs are quotable.
+        live_ts["source"] = "Dated relayed/daily quotes — Cboe official unavailable or unaligned"
         out["term_structure"] = live_ts
+    else:
+        out["term_structure"] = {"aligned": False, "mixed_dates": True,
+                                 "note": _unavailable("Term structure", out["failures"])}
     return out
 
 
@@ -1085,11 +1165,11 @@ def _gex_from_options(options, spot: float, now=None, *, spot_source=None, spot_
         "spot_time": spot_time,
         "greeks_age": "unknown: the provider supplies no greeks timestamp",
         "assumptions": [
-            "call gamma counted positive and put gamma negative: dealers assumed long "
-            "customer calls and short customer puts (inferred, never reported)",
+            ("call gamma counted positive and put gamma negative: dealers assumed long "
+             "customer calls and short customer puts (inferred, never reported)"),
             "open interest is end-of-day, so walls describe the prior session's positioning",
-            "the flip re-prices gamma with Black-Scholes at r=q=0, each contract's own IV, "
-            "a 16:00 ET expiry and a 15-minute floor",
+            ("the flip re-prices gamma with Black-Scholes at r=q=0, each contract's own IV, "
+             "a 16:00 ET expiry and a 15-minute floor"),
         ],
     }
     if degraded_reason:
@@ -1133,7 +1213,7 @@ def gex_tradier(today: dt.date) -> dict:
             near_failed = [e for e in near_exps if e in failed]
             near_opts = [o for e in near_exps for o in chains.get(e, [])]
             full_opts = [o for e in exps for o in chains.get(e, [])]
-            ctx = dict(spot_source=spot_source, spot_time=spot_time)
+            ctx = {"spot_source": spot_source, "spot_time": spot_time}
             res = {
                 "spot": round(spot, 2),
                 "spot_source": spot_source,
@@ -1275,8 +1355,8 @@ def finnhub_news(key: str) -> dict:
 # Assemble + render
 # --------------------------------------------------------------------------- #
 def gather(today: dt.date | None = None) -> dict:
-    today = today or dt.datetime.now().date()
     _et = pd.Timestamp.now(tz="America/New_York")
+    today = today or _et.date()
     return {
         # ET, not local. This field names the data/runs/ archive (_archive_previous_run),
         # and a naive local clock silently offset every archived filename from the brief's
@@ -1319,8 +1399,8 @@ def _bn(x) -> str:
 def render_md(d: dict) -> str:
     """A compact, human-readable dump of the data block (what Claude reads)."""
     L = [f"# BRIEF DATA BLOCK — {d['date']}",
-         f"Data pulled: **{d.get('as_of_et', d['as_of'])}**  "
-         f"(put this freshness stamp in the brief so readers know it's live)", ""]
+         (f"Data pulled: **{d.get('as_of_et', d['as_of'])}**  "
+          f"(put this freshness stamp in the brief so readers know it's live)"), ""]
 
     eg = d["event_gate"]
     L.append("## Event gate")
@@ -1404,19 +1484,25 @@ def render_md(d: dict) -> str:
         eod = mp.get("yields_eod_close") or {}
         if mode == "LIVE" and eod.get("tenors"):
             e10 = eod["tenors"].get("10Y", {})
-            L.append(f"  (prior official close [{eod.get('last_date')}] via "
+            L.append(f"  (EOD reference [{eod.get('last_date')}] via "
                      f"{eod.get('source')}: 10Y {e10.get('last')}%)")
     else:
-        L.append(f"- Treasury yields: UNAVAILABLE (source chain failed: {y.get('source')})")
+        L.append(f"- Treasury yields: UNAVAILABLE — {y.get('error') or y.get('source')}")
+    for source, reason in mp.get("failures", []):
+        L.append(f"  Source attempt failed: {source} ({reason})")
     for t in ["^VIX", "^VIX9D"]:
         v = mp.get(t, {})
         if "error" not in v:
             L.append(f"- {v.get('label')} ({t}): {v.get('last')}  chg {v.get('chg')}  "
-                     f"[{v.get('last_date')}] ({v.get('source', '?')})")
+                     f"[{v.get('last_date')}] ({v.get('source', '?')}; "
+                     f"{v.get('mode', 'relayed quote')})"
+                     f"{' STALE / not current' if v.get('stale') else ''}")
         else:
             L.append(f"- {t}: UNAVAILABLE — {v['error']}")
     off = mp.get("vol_official")
-    if off:
+    if off and off.get("error"):
+        L.append(f"- VOL CURVE: UNAVAILABLE — {off['error']}")
+    if off and off.get("levels"):
         lv = off.get("levels", {})
         curve = "  ".join(f"{s} {lv[s]['last']}" for s in CBOE_INDICES if s in lv)
         L.append(f"- VOL CURVE (Cboe OFFICIAL close [{off.get('as_of')}], "
@@ -1431,6 +1517,8 @@ def render_md(d: dict) -> str:
             L.append("    (percentile is CONTEXT for the regime read — not a gate, not a signal)")
         if off.get("missing"):
             L.append(f"    ⚠️ legs unavailable: {', '.join(off['missing'])}")
+        for source, reason in off.get("failures", []):
+            L.append(f"    {source} ({reason})")
 
     ts = mp.get("term_structure")
     if ts and not ts.get("mixed_dates"):
@@ -1458,6 +1546,8 @@ def render_md(d: dict) -> str:
     cc = d.get("source_crosscheck", {})
     if cc:
         L.append("\n## Source cross-check (CNBC primary vs Yahoo v8 fallback)")
+        for source, reason in cc.get("failures", []):
+            L.append(f"- Cross-check unavailable: {source} ({reason})")
         for grp, lbl, unit in [("yields", "Yields", "bp"), ("vol", "Vol", "pt")]:
             c = cc.get(grp, {})
             if not c.get("n"):
