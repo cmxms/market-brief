@@ -1,14 +1,13 @@
-# Market brief launcher. Called by the "Market Brief (CMXMS)" scheduled task.
+# Market brief launcher for Windows Task Scheduler.
 #
-#   run-brief.ps1                  production, posts to destinations A and B
+#   run-brief.ps1                  production, posts to every configured webhook
 #   run-brief.ps1 -Dry             checks only, posts nothing
 #   run-brief.ps1 -Test            posts to the test channel
 #   run-brief.ps1 -IgnoreWindow    manual run outside 07:30-08:30 Chicago
 #   run-brief.ps1 -ForceWeekend    manual run on a weekend
 #
-# The exit code is returned to Task Scheduler unchanged. The previous launcher
-# ended on a toast command, so PowerShell always returned 0 and a failed run
-# looked like a success in the scheduler.
+# The exit code is returned to Task Scheduler unchanged, so a failed run shows up
+# as failed rather than looking like a success.
 param(
     [switch]$Dry,
     [switch]$Test,
@@ -27,8 +26,9 @@ if (-not (Test-Path $py)) {
     exit 9
 }
 
-$workspace = Split-Path -Parent (Split-Path -Parent $root)
-$logDir = Join-Path $workspace 'runtime\market-brief\logs'
+# Ask the project which runtime folder it uses, rather than assuming a layout.
+$runtime = & $py -c "import config; print(config.RUNTIME)"
+$logDir = Join-Path $runtime 'logs'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $console = Join-Path $logDir ("{0}.console.log" -f (Get-Date -Format 'yyyy-MM-dd'))
 

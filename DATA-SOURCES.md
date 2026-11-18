@@ -1,10 +1,12 @@
-# market-brief — how it works today
+# market-brief — data sources and behaviour contract
 
-Written 2026-07-26, before any rewrite. **This is the contract.** When the data-fetching half
-moves into Discount Bloomberg, every source chain below must still work in the same order and
-produce the same fields. Anything that changes here is a regression, not an improvement.
+Every number in a brief comes from a chain of sources tried in a fixed order, and the order is part
+of the product: it decides what a reader sees when a provider is down. This document is the
+reference for those chains, and for the behaviours that were measured into place afterwards.
 
-Verified by a full `gather.py` run from the new CMTMS location on 2026-07-26.
+**Read it as a contract.** If a chain below changes order or loses a field, that is a regression
+until someone decides otherwise on purpose. Each section names the function that implements it, so
+this document and the code can be read side by side.
 
 ---
 
@@ -149,21 +151,18 @@ chain stays silent, and zero-OI drops are asserted to leave GEX/flip/walls bit-i
 ⚠️ **This is a note to the brief WRITER, never brief copy** — see playbook.md's "never publish
 process notes."
 
-**The card honors the same flag** (added 2026-08-05; **card retired 2026-08-17** — the brief now
-posts as text only, and `tldr_card.py` was removed on 2026-11-16, recoverable from git history.
-Kept below because the lesson outlives the feature, and because it's the contract to restore if the
-card ever comes back.) `tldr_card.py`'s number strip used to read
-`gex.SPY.near_term.regime` unconditionally and print `SPY GAMMA: POSITIVE`. On 2026-08-05 that
-put a confident regime call on the graphic while the brief — correctly following the playbook —
-said the gamma read was unavailable. **The card contradicted the text it was rendered from.**
-It now prints `SPY GAMMA: N/A` in muted ink whenever `data_warning` is set — still correct,
-and it stays: the card must never assert a regime the brief withheld.
+**A second rendering of the block taught the same lesson twice** (a graphic card existed from
+2026-08-05 to 2026-08-17; it is gone, the lessons are not). Its number strip read
+`gex.SPY.near_term.regime` unconditionally and printed `SPY GAMMA: POSITIVE` on 2026-08-05 while the
+brief — correctly — said the gamma read was unavailable. **The graphic contradicted the text it was
+rendered from.** It was fixed to print `N/A` whenever `data_warning` is set, which is the standing
+rule for anything that renders this block a second time: never assert a regime the brief withheld.
 
 🔑 **But the trigger underneath it was wrong, and the card fix hid that.** The 2026-08-05
 "first real trigger" (420 of 14,018 SPY, 352 of 12,566 QQQ, `dropped_oi_pct` **0.0%** on both)
 was never a degraded chain — it was newly-listed zero-OI strikes, and the count alarm fired
-while the alarm that tracks missing GEX did not. Making the card agree with the brief made
-both of them consistently wrong, and because the graphic now looked right, the false positive
+while the alarm that tracks missing GEX did not. Making the graphic agree with the brief made
+both of them consistently wrong, and because it now looked right, the false positive
 read as handled for three more mornings. **Retuned 2026-08-06** — see the guard section above.
 Worth remembering as a shape: *reconciling two outputs is not the same as validating either.*
 
@@ -173,13 +172,13 @@ Worth remembering as a shape: *reconciling two outputs is not the same as valida
 
 | Key | What it is | Drives |
 |---|---|---|
-| `events` | MFFU's prop-firm restricted-trading list — FOMC, FOMC Minutes, Employment Situation, CPI | `today_is_t1` |
+| `events` | a prop firm's restricted-trading list — FOMC, FOMC Minutes, Employment Situation, CPI | `today_is_t1` |
 | `tier2` | Market-moving but NOT T1 — PCE, GDP, PPI, retail sales, jobless claims | `today_tier2` |
 
 **`today_is_t1` still means only what it always meant.** Tier 2 must never be folded into it
 or the prop-firm gate silently changes meaning. Why the split exists: on 2026-07-30 the gate
 reported no events on a morning that had GDP + PCE + claims all printing at 08:30, because
-none of the three is on MFFU's list. Today's tier-2 releases now render first and in red.
+none of the three is on that restricted list. Today's tier-2 releases now render first and in red.
 
 Dates come from the **FRED release calendar** (`fred/release/dates`, IDs in the YAML header).
 🔑 This matters because **bls.gov returns 403 to automated fetch** — tested with and without a
@@ -222,8 +221,6 @@ tagged against a theme keyword list, because a pure macro search misses sector c
 
 1. `data/{date}.json` — every number, machine-readable. **Always "the latest run"** — the path
    never changes, so `playbook.md` and any other reader of that path keep working.
-   (`brief-live`, the dashboard that used to import these functions, was retired with CMTMS;
-   the rule stands for whatever reads it next.)
 2. `data/{date}.data.md` — the same thing as a human-readable block
 3. `data/runs/{date}-{HHMM}.json` + `.data.md` — a **superseded** run, moved here automatically
    before a re-run overwrites it (added 2026-08-02). `HHMM` is the same time the brief's
@@ -246,5 +243,6 @@ result rather than redoing it.
 
 ## Keys it needs
 
-`FRED_API_KEY`, `TRADIER_API_KEY`, `FINNHUB_API_KEY` — currently its own `.env`. After the
-rewrite these should live in Discount Bloomberg only.
+`TRADIER_API_KEY` and `FINNHUB_API_KEY` are required; `FRED_API_KEY` is optional and only backs up
+the Treasury-yield chain. Where the file goes, and what each key is for, is in the setup section of
+`README.md`.

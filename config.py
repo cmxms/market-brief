@@ -1,10 +1,11 @@
 """Paths and settings for the market brief.
 
 Nothing here depends on the working directory: the project root is resolved from
-this file, and the runtime root from the workspace layout (or MARKET_BRIEF_RUNTIME).
+this file, and the runtime root from `MARKET_BRIEF_RUNTIME`, a sibling workspace
+runtime, or a `runtime/` folder inside the repository — in that order.
 
-Secrets live in runtime/market-brief/config/.env, outside the repository.
-Ordinary settings live in runtime/market-brief/config/settings.toml.
+Secrets live in <runtime>/config/.env, outside version control.
+Ordinary settings live in <runtime>/config/settings.toml.
 """
 
 from __future__ import annotations
@@ -13,12 +14,27 @@ import os
 import tomllib
 from pathlib import Path
 
-PROJECT = Path(__file__).resolve().parent            # .../CMXMS/projects/market-brief
-WORKSPACE = PROJECT.parents[1]                       # .../CMXMS
+PROJECT = Path(__file__).resolve().parent            # the repository root
+_SIBLING_RUNTIME = PROJECT.parents[1] / "runtime" if len(PROJECT.parents) > 1 else None
 
-RUNTIME = Path(
-    os.environ.get("MARKET_BRIEF_RUNTIME") or (WORKSPACE / "runtime" / "market-brief")
-)
+
+def _runtime_root() -> Path:
+    """Where data, logs, state and credentials live.
+
+    An explicit `MARKET_BRIEF_RUNTIME` always wins. Otherwise a runtime folder
+    beside the repository's parent directory is used, which is the layout this
+    project was built in; failing that, a `runtime/` folder inside the repository,
+    so a plain clone runs without configuration.
+    """
+    explicit = os.environ.get("MARKET_BRIEF_RUNTIME")
+    if explicit:
+        return Path(explicit)
+    if _SIBLING_RUNTIME is not None and _SIBLING_RUNTIME.is_dir():
+        return _SIBLING_RUNTIME / "market-brief"
+    return PROJECT / "runtime"
+
+
+RUNTIME = _runtime_root()
 DATA = RUNTIME / "data"
 LOGS = RUNTIME / "logs"
 STATE = RUNTIME / "state"

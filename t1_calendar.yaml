@@ -2,7 +2,7 @@
 #
 # TWO TIERS — they answer different questions. Don't merge them.
 #
-#   events (T1)  = MFFU's prop-firm restricted-trading list. "T1" means you are
+#   events (T1)  = a prop firm's restricted-trading list. "T1" means you are
 #                  BLOCKED FROM TRADING around it, not "it moves the market."
 #                    - FOMC Meeting (rate decision day)
 #                    - FOMC Minutes

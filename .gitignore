@@ -5,6 +5,8 @@ __pycache__/
 .pytest_cache/
 data/
 _harvest/
+# A runtime folder inside the repository (the default for a plain clone).
+runtime/
 # briefs/ is intentionally committed — it's the shareable archive of past briefs.
 # Exception: a dry run is not part of the archive. 2026-11-15 was a Sunday test of
 # compose/validate that was generated but never posted, so it did not happen.
