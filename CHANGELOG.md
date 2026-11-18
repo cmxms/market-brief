@@ -27,7 +27,7 @@ version numbers; entries are dated.
   What remains is what a coding agent actually needs and cannot get elsewhere: `README.md` is
   authoritative, the compose step never posts, never invent a number, and a failed validation is
   not published. Workspace-wide rules stay in `CMXMS/AGENTS.md`.
-- **README documents the missing-calendar behaviour.** A missing `market_holidays.yaml` warns
+- **README documents the missing-calendar behavior.** A missing `market_holidays.yaml` warns
   and continues rather than refusing to run; that fact used to live only in `AGENTS.md`.
 
 ### Removed

@@ -1,8 +1,8 @@
-# market-brief — data sources and behaviour contract
+# market-brief — data sources and behavior contract
 
 Every number in a brief comes from a chain of sources tried in a fixed order, and the order is part
 of the product: it decides what a reader sees when a provider is down. This document is the
-reference for those chains, and for the behaviours that were measured into place afterwards.
+reference for those chains, and for the behaviors that were measured into place afterwards.
 
 **Read it as a contract.** If a chain below changes order or loses a field, that is a regression
 until someone decides otherwise on purpose. Each section names the function that implements it, so
@@ -80,7 +80,7 @@ VIX's close for that session is recovered as `last - chg`, and VIX9D's `last` al
 close — and carries the live VIX move separately. Fields: `spread_9d_minus_30d` (always the
 safe-to-quote number), `state`, `as_of`, `aligned`, `mixed_dates`, plus
 `spread_raw_unaligned` kept **only** so the block can say don't quote it. When both legs share
-a date the behaviour is unchanged (verified byte-identical on the 3 such days).
+a date the behavior is unchanged (verified byte-identical on the 3 such days).
 
 ## 5. Index futures and oil
 
@@ -144,7 +144,7 @@ missing, the loss is *unbounded*, not zero — so it alarms on sight. The old co
 has never fired on real data (0 occurrences in every sample), but it is the failure mode that
 would make `dropped_oi_pct` lie.
 
-Guard behaviour is pinned by `tests/test_gex_guard.py` (5 cases, no pytest needed): zero-OI
+Guard behavior is pinned by `tests/test_gex_guard.py` (5 cases, no pytest needed): zero-OI
 drops stay silent, greeks lost on contracts holding real OI fire, absent OI fires, a clean
 chain stays silent, and zero-OI drops are asserted to leave GEX/flip/walls bit-identical.
 
