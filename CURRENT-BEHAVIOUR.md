@@ -32,7 +32,14 @@ carries the source it came from and how old it is, so a fallback is visible rath
 Tradier is deliberately **not** in this chain — it doesn't quote Treasury yield indices.
 
 Returns per tenor: `last`, `prev`, `chg`. Plus `source`, `last_date`, `as_of`,
-`weekdays_behind`, `stale`.
+`sessions_behind`, `stale`.
+
+`sessions_behind` counts **market sessions**, not weekdays: weekends and the ten US market holidays
+are excluded (New Year, MLK, Washington's Birthday, Good Friday, Memorial, Juneteenth, Independence,
+Labor, Thanksgiving, Christmas; Saturday holidays observed Friday, Sunday observed Monday). So a
+Treasury file from Friday is fresh when read on Monday, and it is the *missing Monday* that flips it
+stale on Tuesday. Before 2026-11-17 this counted weekdays, so the morning after a holiday flagged
+fresh data as STALE — the one warning that must never cry wolf.
 
 ## 2. Treasury yields — live
 
@@ -48,6 +55,11 @@ Returns per tenor: `last`, `prev`, `chg`. Plus `source`, `last_date`, `as_of`,
 `source_crosscheck()` compares CNBC against Yahoo each morning and records whether they agree
 within a tolerance. **This is a data-quality gate, not decoration** — it's how a bad feed gets
 caught before it reaches the brief. Output per key: `primary`, `fallback`, `diff`, `match`.
+
+It compares **the samples the brief actually published**, not a fresh download. Each relay is
+fetched once by the gathering pass and those values are handed to the check, so a feed that was good
+at 06:01 and bad at 06:00 cannot pass on a re-fetch. Only when no sample exists at all does it
+re-download, and the result is labelled "Last-resort re-fetch — not the published sample".
 
 ## 4. Volatility
 

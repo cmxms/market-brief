@@ -6,6 +6,23 @@ version numbers; entries are dated.
 
 ## 2026-11-17
 
+### Fixed
+
+- **A market holiday could make fresh Treasury data read as STALE.** Staleness counted weekdays, so
+  the morning after a holiday the previous session's closing file looked a day old. It now counts
+  **market sessions**, excluding weekends and the ten US market holidays (including Good Friday, and
+  observed-date shifts when a holiday lands on a weekend). A false alarm on the data-quality flag is
+  worse than no flag: it teaches the reader to ignore the one warning that matters.
+- **A degraded options chain said something had failed without saying what.** The warning now names
+  the affected view (`near_term` or `full_chain`) and the expiries whose fetch failed, so a clean
+  view can no longer read as a symbol-wide problem.
+- **Two headlines were fetched and never printed.** `finnhub_news` kept 14 general headlines and the
+  renderer printed 12. All collected headlines now reach the brief; a cap, if ever needed, must say
+  how many were withheld.
+- **The source cross-check validated a re-download instead of the published number.** A feed could be
+  correct at 06:01 and wrong at 06:00 and still pass. The check now compares the samples the brief
+  actually used; a re-download happens only with nothing to compare, and says so.
+
 ### Removed
 
 - **`BACKLOG.md` retired: 170 lines down to 26.** Every remaining entry was fixed, moot, or too
