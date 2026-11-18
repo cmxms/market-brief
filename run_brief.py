@@ -24,7 +24,6 @@ import argparse
 import datetime as dt
 import json
 import sys
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import config

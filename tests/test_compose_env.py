@@ -29,7 +29,7 @@ def composer(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "STATE", tmp_path)
     monkeypatch.setattr(config, "BRIEFS", tmp_path)
     monkeypatch.setattr(config, "PROJECT", tmp_path)
-    monkeypatch.setattr(config, "load_settings", lambda: {})
+    monkeypatch.setattr(config, "load_settings", dict)
     monkeypatch.setattr(config, "hermes_bin", lambda: "fake-hermes")
     (tmp_path / "2026-07-14.md").write_text("reference", encoding="utf-8")
     data = tmp_path / "data.md"

@@ -648,7 +648,7 @@ def cboe_vol_official() -> dict:
         # Percentile joins only sessions where BOTH legs exist. VIX starts 1990 and VIX3M
         # 2009; an unaligned join would score today against days VIX3M never had.
         v3map = dict(series["VIX3M"])
-        hist = [c / v3map[d] for d, c in series["VIX"] if d in v3map and v3map[d]]
+        hist = [c / v3map[d] for d, c in series["VIX"] if v3map.get(d)]
         window = hist[-CBOE_LOOKBACK:]
         if window:
             out["vix_vix3m_pct"] = round(
@@ -1239,7 +1239,7 @@ def finnhub_news(key: str) -> dict:
             seen.add(hl)
             rows.append({
                 "headline": hl, "source": x.get("source", ""),
-                "dt": (dt.datetime.fromtimestamp(x["datetime"], dt.timezone.utc).isoformat()
+                "dt": (dt.datetime.fromtimestamp(x["datetime"], dt.UTC).isoformat()
                        if x.get("datetime") else None),
                 "url": x.get("url", ""),
                 "trusted": (x.get("source", "").lower() in TRUSTED_SOURCES),

@@ -9,7 +9,6 @@ number is true; that is what the gather block and the playbook rules are for.
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 # Emoji-prefixed section headers, in the order the playbook fixes them.
 SECTION_MARKERS = ("## 📰", "## 📊", "## 🔁", "## 📈", "## 🚨", "## 🧭")

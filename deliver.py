@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import config
@@ -19,7 +19,7 @@ LEDGER = config.STATE / "delivery.jsonl"
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    return datetime.now(UTC).astimezone().isoformat(timespec="seconds")
 
 
 def already_delivered(date: str, target: str) -> bool:
