@@ -98,6 +98,7 @@ def deliver_test(md: str, date: str, channel_id: str, force: bool = False) -> tu
             proc = subprocess.run(
                 [config.hermes_bin(), "send", "--to", f"discord:{channel_id}", "--file", str(tmp_path)],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+                check=False,
             )
         finally:
             tmp_path.unlink(missing_ok=True)

@@ -16,6 +16,7 @@ Creds (env / .env, or GitHub Actions secret):
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 import sys
@@ -30,6 +31,7 @@ for _s in (sys.stdout, sys.stderr):
         _s.reconfigure(encoding="utf-8", errors="replace")
 
 LIMIT = 1900   # under Discord's 2000 hard cap, with margin for safety
+logger = logging.getLogger(__name__)
 
 
 def _load_dotenv() -> None:
@@ -125,8 +127,8 @@ def _send(webhook: str, content: str) -> None:
             wait = 2.0
             try:
                 wait = float(r.json().get("retry_after", 2.0))
-            except Exception:
-                pass
+            except (ValueError, TypeError, AttributeError) as exc:
+                logger.warning("Discord retry delay unreadable; using 2 seconds: %s", sanitize(str(exc)))
             time.sleep(wait + 0.5)
             continue
         if r.status_code >= 400:
@@ -200,8 +202,8 @@ def _send_file(webhook: str, path: Path, content: str = "") -> None:
             wait = 2.0
             try:
                 wait = float(r.json().get("retry_after", 2.0))
-            except Exception:
-                pass
+            except (ValueError, TypeError, AttributeError) as exc:
+                logger.warning("Discord image retry delay unreadable; using 2 seconds: %s", sanitize(str(exc)))
             time.sleep(wait + 0.5)
             continue
         if r.status_code >= 400:
@@ -222,7 +224,7 @@ def post_image(path: str | Path, webhook: str | list[str] | None = None, content
         try:
             _send_file(w, p, content)
             ok.append(w)
-        except Exception as e:
+        except (RuntimeError, OSError, requests.RequestException) as e:
             failed.append(w)
             print(f"  WARN Discord image upload failed ({fingerprint(w)}): {sanitize(str(e))}", flush=True)
     if not ok:
@@ -259,7 +261,7 @@ def post(brief_md: str, webhook: str | list[str] | None = None) -> str:
         try:
             _post_one(w, msgs)
             ok.append(w)
-        except Exception as e:
+        except (RuntimeError, requests.RequestException) as e:
             failed.append(w)
             print(f"  WARN Discord webhook failed ({fingerprint(w)}): {sanitize(str(e))}", flush=True)
     if not ok:
@@ -330,7 +332,7 @@ def _parse_stamp(brief_md: str):
 
 def _calendar_events_today(day) -> list[tuple[str, str]]:
     """(time_et, name) for T1 + tier2 events on `day`, from that date's gather JSON.
-    Empty on any failure — this is a warning path and must never break a post.
+    Expected file failures warn and return empty; unexpected errors propagate.
 
     The data block lives in the configured runtime root, not beside this script. It
     used to sit in `./data/`, so moving operational files out of the repository
@@ -343,13 +345,14 @@ def _calendar_events_today(day) -> list[tuple[str, str]]:
     try:
         import config
         candidates.append(config.DATA / f"{day.isoformat()}.json")
-    except Exception:
-        pass
+    except ImportError as exc:
+        raise RuntimeError(f"Stale-check configuration unavailable: {type(exc).__name__}") from None
     candidates.append(Path(__file__).resolve().parent / "data" / f"{day.isoformat()}.json")
     for p in candidates:
         try:
             eg = json.loads(p.read_text(encoding="utf-8")).get("event_gate", {})
-        except Exception:
+        except (OSError, ValueError) as exc:
+            logger.warning("Stale-check calendar unavailable at %s: %s", p, sanitize(str(exc)))
             continue
         return [(e.get("time_et", "??:??"), e.get("name", "?"))
                 for e in (eg.get("today_events") or []) + (eg.get("today_tier2") or [])]
