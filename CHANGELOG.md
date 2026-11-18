@@ -4,6 +4,39 @@ Notable changes to market-brief, newest first. Format follows
 [Keep a Changelog](https://keepachangelog.com/). This project does not publish
 version numbers; entries are dated.
 
+## 2026-11-18
+
+### Changed
+
+- **The repository now reads as a product, not a working copy.** `CURRENT-BEHAVIOUR.md`
+  became `DATA-SOURCES.md` and lost its internal framing (it opened as a pre-rewrite
+  contract for a migration an outside reader has never heard of); the retired-card section
+  keeps its lesson and loses the module history; "MFFU", "CMTMS", "Discount Bloomberg" and
+  the old dashboard are gone from the prose, the comments and the calendar header.
+- **README gained a real setup path**: Python version, dependencies, the Hermes requirement
+  for the compose step, a table of the four credentials and which two are required, the
+  runtime-folder resolution order, and a `--dry` command that proves the chain works.
+- **`settings.example.toml` added** — every setting with its default, since the whole file
+  was previously undocumented.
+- **A plain clone now runs without configuration.** The runtime root falls back to
+  `<repo>/runtime` (gitignored) when there is no sibling workspace runtime, instead of
+  resolving outside the repository. `scheduled/run-brief.ps1` asks `config` for the path
+  rather than assuming a layout.
+- **`AGENTS.md` cut from 55 lines to a pointer.** It was a near-verbatim copy of `README.md` —
+  pipeline, rules, storage, exit codes — so two copies of the same contract were free to drift.
+  What remains is what a coding agent actually needs and cannot get elsewhere: `README.md` is
+  authoritative, the compose step never posts, never invent a number, and a failed validation is
+  not published. Workspace-wide rules stay in `CMXMS/AGENTS.md`.
+- **README documents the missing-calendar behaviour.** A missing `market_holidays.yaml` warns
+  and continues rather than refusing to run; that fact used to live only in `AGENTS.md`.
+
+### Removed
+
+- **`BACKLOG.md` deleted.** The file existed only to announce that it was empty, and pointed at
+  `CMXMS/WORKLIST.md`, a path no reader of this repository can see. Its content was internal
+  housekeeping in a public repo. The retirement rationale is in the 2026-11-17 entry below; the
+  file itself remains in git history.
+
 ## 2026-11-17
 
 ### Fixed

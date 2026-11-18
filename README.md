@@ -6,13 +6,18 @@ situational awareness — what happened, what is rotating, where the dealer-gamm
 and volatility regime sit, what is on the event calendar. **Not** financial
 advice.
 
+Recent output is in [`briefs/`](briefs/). The source chain behind every number,
+and why each fallback exists, is in [`DATA-SOURCES.md`](DATA-SOURCES.md).
+
 ## Pipeline
 
 `run_brief.py` runs four steps, and a later step only runs if the earlier one
 succeeded:
 
-1. **gather** — `gather.py` pulls the numbers into a data block.
-2. **compose** — Hermes writes the brief from `playbook.md` plus that block.
+1. **gather** — `gather.py` pulls the numbers into a data block. No model, no
+   cost, deterministic.
+2. **compose** — a headless Hermes agent writes the brief from `playbook.md`
+   plus that block.
 3. **validate** — structural and policy checks; a failure stops the run.
 4. **deliver** — Discord, through a per-destination ledger that refuses to post
    the same brief to the same destination twice.
@@ -27,44 +32,107 @@ shaped. This file is the operating contract around it.
   closes with the VIX/VIX3M regime ratio.
 - **Sector rotation** — the 11 SPDR sectors plus semis/software/growth, ranked
   against SPY.
-- **Dealer gamma (GEX)** for SPY and QQQ: near-term and full-chain views.
-- **Event gate** — high-impact events from the bundled calendar.
+- **Dealer gamma (GEX)** for SPY and QQQ: near-term and full-chain views,
+  computed from the Tradier chain rather than taken from a vendor.
+- **Event gate** — high-impact events from the bundled calendar, in two tiers.
 - **Headlines** — overnight wire via Finnhub, trusted-source ranked.
 
 ## Rules
 
 - **The compose step never posts.** It runs with the `web` and `file` toolsets
   only, so it has no terminal, and it receives a filtered environment: keys
-  declared in `runtime/market-brief/config/.env` and anything matching
-  `DISCORD_WEBHOOK*` are stripped before launch.
+  declared in the runtime `.env` and anything matching `DISCORD_WEBHOOK*` are
+  stripped before launch. Posting is a separate process after validation.
 - **Never invent a number.** Every figure comes from the data block or a page the
-  agent fetched itself.
+  agent fetched itself. Claims that need a source go in a claims ledger, not the
+  brief.
 - **No links, citations or source lists in the brief.** Verify sources privately;
   keep them in the run log or the data block.
 - **A brief that fails validation is not published**, and the failure is reported
   with a non-zero exit code.
 
-## Where things live
+## Requirements
 
-- This repository: code, tests, `playbook.md`, the briefs archive.
-- `runtime/market-brief/data/` — gathered data blocks.
-- `runtime/market-brief/logs/` — run logs.
-- `runtime/market-brief/state/` — delivery ledger, usage log, prompts, claims.
-- `runtime/market-brief/config/` — `.env` (credentials) and `settings.toml`.
+- **Python 3.11 or newer** — settings are read with the standard library's TOML
+  parser. Developed and run on 3.13.
+- **A model the brief writer can use.** The compose step shells out to the
+  [Hermes Agent](https://hermes-agent.nousresearch.com/docs) CLI (`hermes chat`)
+  with a prompt and a tool allowlist, so Hermes must be installed and configured
+  with a provider before the pipeline can produce a brief. Gathering, validation
+  and delivery do not need it.
+- **Credentials** — two required, see below.
 
-Nothing resolves paths from the working directory. Credentials are never stored
-in the repository; `.env.example` names the variables and nothing more.
+## Setup
+
+```bash
+git clone https://github.com/cmxms/market-brief.git
+cd market-brief
+python -m venv .venv
+.venv/Scripts/python.exe -m pip install -r requirements.txt   # Windows
+# .venv/bin/python -m pip install -r requirements.txt         # macOS / Linux
+```
+
+### Where the runtime lives
+
+Data blocks, logs, the delivery ledger and credentials all live in a **runtime
+folder outside version control**. Its location, in order of precedence:
+
+1. `$MARKET_BRIEF_RUNTIME`, if set.
+2. A `runtime/` folder beside the repository's parent directory — the layout
+   this project was built in.
+3. `runtime/` inside the repository — the default for a plain clone, already
+   gitignored.
+
+To see which one your checkout resolves to:
+
+```bash
+.venv/Scripts/python.exe -c "import config; print(config.RUNTIME)"
+```
+
+### Credentials
+
+Copy `.env.example` to `<runtime>/config/.env` and fill it in. Real environment
+variables override the file, so CI secrets work too.
+
+| Variable | Required | Used for |
+|---|---|---|
+| `TRADIER_API_KEY` | **yes** | Live option chain; without it the gamma section is unavailable. A free developer account works. |
+| `FINNHUB_API_KEY` | **yes** | Overnight headlines. Free tier is enough. |
+| `FRED_API_KEY` | no | Backs up the Treasury-yield chain, and is how the event calendar reads BLS dates. |
+| `DISCORD_WEBHOOK_URL` | to post | One or more incoming-webhook URLs, comma- or whitespace-separated. `DISCORD_WEBHOOK_URLS` is merged in as well. |
+
+Nothing else is needed: futures, sector ETFs, VIX and the Treasury par curve
+come from public endpoints with no key.
+
+### Settings
+
+Optional. Copy `settings.example.toml` to `<runtime>/config/settings.toml`; every
+key in it is documented with its default, so a missing file changes nothing.
+Two worth setting on a fresh install: `[model] name` (which model writes the
+brief) and `[discord] test_channel_id` (where `--test` posts).
+
+### Check it works
+
+```bash
+.venv/Scripts/python.exe run_brief.py --dry --ignore-window --force-weekend
+```
+
+`--dry` gathers, composes and validates, then prints the messages it *would*
+post. Nothing reaches Discord. Exit code 0 means the whole chain works.
 
 ## Running it
 
-```
-.venv/Scripts/python.exe run_brief.py --dry --ignore-window --force-weekend   # checks only, prints the split
-.venv/Scripts/python.exe run_brief.py --test --ignore-window                  # posts to the test channel
-.venv/Scripts/python.exe run_brief.py                                          # production
+```bash
+.venv/Scripts/python.exe run_brief.py                          # production: gather, compose, validate, post
+.venv/Scripts/python.exe run_brief.py --test --ignore-window   # same, but to the test channel
+.venv/Scripts/python.exe run_brief.py --dry --ignore-window    # no posting at all
+.venv/Scripts/python.exe run_brief.py --deliver-only           # re-post today's existing brief
 ```
 
-The scheduled run fires weekdays at 07:35 Chicago and only proceeds inside the
-07:30–08:30 window. Weekends and NYSE holidays exit 2 without posting.
+Useful flags: `--date YYYY-MM-DD` to run for another session, `--skip-gather` to
+reuse the existing data block, `--force` to bypass the delivery ledger,
+`--ignore-window` outside 07:30–08:30 Chicago, `--force-weekend`,
+`--force-holiday`.
 
 Exit codes: 0 ok, 2 skipped (weekend or holiday), 3 gather, 4 compose,
 5 validation, 6 outside window, 7 delivery, 8 spend estimate reached.
@@ -73,12 +141,41 @@ A delivery that reaches some destinations but not all exits 7. The ledger record
 each destination separately, so the next run re-sends only the ones still
 missing — it does not duplicate the ones that worked.
 
+Weekends and NYSE holidays exit 2 without posting. Market holidays come from
+`market_holidays.yaml` (closures for 2026 and 2027). If that file is missing the
+run warns and continues rather than refusing to start, so confirm it is present
+after any environment change.
+
+`run_brief.py` also refuses to run once the month's estimated model spend would
+pass `[limits] monthly_usd_cap`; raise it deliberately, not by accident.
+
+## Scheduling
+
+`scheduled/run-brief.ps1` is a Windows Task Scheduler launcher that runs the
+pipeline with the project's own interpreter and returns its exit code unchanged,
+so a failed run shows up as failed. On other platforms the same thing is a cron
+entry calling `run_brief.py`. The production schedule is weekdays at 07:35
+Chicago, inside the 07:30–08:30 window.
+
+## Where things live
+
+- Repository: code, tests, `playbook.md`, `market_holidays.yaml`,
+  `t1_calendar.yaml`, the `briefs/` archive.
+- `<runtime>/data/` — gathered data blocks, plus superseded runs.
+- `<runtime>/logs/` — one log per date.
+- `<runtime>/state/` — delivery ledger, spend log, prompts, claims.
+- `<runtime>/config/` — `.env` and `settings.toml`.
+
+Nothing resolves paths from the working directory. Credentials are never stored
+in the repository; `.env.example` names the variables and nothing more.
+
 ## Tests
 
-```
+```bash
 .venv/Scripts/python.exe -m pytest -q
 ```
 
-Covers the gamma flip, the GEX fallbacks, the roll guard, the stale-block check,
-delivery ledger and redaction, and the compose environment. Three of the older
-test files are script-style and also run directly (`python tests/test_x.py`).
+Covers the gamma flip, the GEX guards, the roll guard, the stale-block check,
+delivery ledger and redaction, error visibility, and the compose environment.
+Three of the older test files are script-style and also run directly
+(`python tests/test_x.py`).

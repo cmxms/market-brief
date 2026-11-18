@@ -994,7 +994,7 @@ def index_recap() -> dict:
 #   sign = +1 calls, -1 puts (dealers net short calls / long puts).
 #   Positive total GEX -> dealers long gamma -> vol-suppress / mean-revert.
 #   Negative total GEX -> dealers short gamma -> vol-amplify / momentum.
-# This is the identical formula the recorded (Discount Bloomberg) GEX used, on the
+# This is the identical formula the recorded reference GEX used, on the
 # same Tradier-supplied greeks — so the numbers stay continuous with that history.
 # We report TWO views from one chain fetch:
 #   - near_term: nearest GEX_NEAR_EXPIRATIONS expirations (the intraday regime read),
@@ -1306,7 +1306,7 @@ def event_gate(today: dt.date, horizon_days: int = 21) -> dict:
     """Read both calendar tiers.
 
     The two tiers answer different questions and are deliberately NOT merged:
-      - `events` (T1) is MFFU's restricted-trading list -> drives `today_is_t1`.
+      - `events` (T1) is a prop firm's restricted-trading list -> drives `today_is_t1`.
       - `tier2`  is market-moving-but-not-T1 (PCE, GDP, PPI, retail, claims).
 
     Before tier2 existed the brief's event section was T1-only, and on 2026-07-30
@@ -1491,7 +1491,7 @@ def render_md(d: dict) -> str:
             for m in eg["malformed"][:6]:
                 L.append(f"    - {m}")
         L.append(f"- today_is_t1: **{eg.get('today_is_t1')}**   "
-                 f"(MFFU restricted-trading list ONLY — not 'nothing happens today')")
+                 f"(prop-firm restricted list ONLY — not 'nothing happens today')")
 
         # Today's tier-2 releases go FIRST and loud. This is the line whose absence
         # nearly cost the 2026-07-30 brief its two biggest numbers.
@@ -1738,7 +1738,7 @@ def _archive_previous_run(date: str) -> str | None:
 
     Deliberately archive rather than rename the live file: data/{date}.json stays
     "the latest run", so playbook.md and anything else reading that path are untouched.
-    (`brief-live`, which used to import these functions live, was retired with CMTMS.) The archive is keyed by the SAME HH:MM the brief's stamp shows, so
+    The archive is keyed by the SAME HH:MM the brief's stamp shows, so
     any past brief resolves to exactly one file with no extra bookkeeping.
 
     That key is **ET**, from the block's own tz-aware `as_of` — the same clock as the

@@ -1,0 +1,36 @@
+# market-brief settings — every key is optional, these are the defaults.
+#
+# Copy to <runtime>/config/settings.toml and edit what you need. Missing file or
+# missing key means the default below is used.
+
+[model]
+# Any model id your Hermes installation can reach.
+name = "deepseek/deepseek-v4.1-flash-1017"
+# Stop the writer if it has not finished after this many tool turns.
+max_turns = 40
+# Wall-clock ceiling for the compose step, in seconds.
+run_budget_seconds = 900
+
+[brief]
+# Hard limit on the finished brief; validation rejects anything longer.
+max_chars = 5200
+# Brief used as the house-style reference in the compose prompt.
+reference = "2026-07-14.md"
+
+[limits]
+# Refuse to run once the month's estimated spend would exceed this.
+monthly_usd_cap = 2.0
+# Cost estimate added to the running total for each run.
+estimated_usd_per_run = 0.05
+
+[discord]
+# Channel for `--test` runs. Empty means test mode refuses to send.
+test_channel_id = ""
+
+[calendar]
+# NYSE holiday calendar used to skip market holidays.
+holidays_file = "market_holidays.yaml"
+
+[runtime]
+# The Hermes executable used for compose and test delivery.
+hermes_bin = "hermes"
