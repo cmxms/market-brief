@@ -1,5 +1,7 @@
 """roll_guard: a continuous-contract move that is really a contract change."""
-import sys, pathlib
+import pathlib
+import sys
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from gather import roll_guard
 

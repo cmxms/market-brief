@@ -20,6 +20,7 @@ import os
 import re
 import sys
 import time
+from datetime import UTC
 from pathlib import Path
 
 import requests
@@ -54,7 +55,7 @@ def _strip_comments(md: str) -> str:
     literally — so the brief's `<!-- CARD -->` block (the TL;DR image's input, see
     tldr_card.py) would otherwise be published as visible junk."""
     import re
-    return re.sub(r"\n?<!--.*?-->\n?", "\n", md, flags=re.S)
+    return re.sub(r"\n?<!--.*?-->\n?", "\n", md, flags=re.DOTALL)
 
 
 def _split_long(section: str) -> list[str]:
@@ -304,9 +305,9 @@ _MARKET_OPEN = "09:30"
 
 def _now_et():
     """Current ET, tz-aware. Never read a wall clock off the shell on this box."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     from zoneinfo import ZoneInfo
-    return datetime.now(timezone.utc).astimezone(ZoneInfo(ET))
+    return datetime.now(UTC).astimezone(ZoneInfo(ET))
 
 
 def _parse_stamp(brief_md: str):
@@ -391,7 +392,7 @@ def stale_check(brief_md: str) -> bool:
         # %-I is glibc, %#I is MSVC; this runs on both.
         return dt.strftime("%#I:%M %p" if os.name == "nt" else "%-I:%M %p")
 
-    print("", flush=True)
+    print(flush=True)
     print("  ⚠  STALE BLOCK CHECK", flush=True)
     print(f"  block as_of_et : {_fmt(stamp)} ET", flush=True)
     print(f"  now            : {_fmt(now)} ET  (+{gap_min} min)", flush=True)

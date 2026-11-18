@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import gather as G  # noqa: E402
+import gather as G
 
 SPOT = 700.0
 

@@ -29,7 +29,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import post_discord as P  # noqa: E402
+import post_discord as P
 
 ET = ZoneInfo("America/New_York")
 _passed = _failed = 0

@@ -19,7 +19,7 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import gather as G  # noqa: E402
+import gather as G
 
 NOW = pd.Timestamp("2026-09-29 08:36", tz="America/New_York")
 EXP = "2026-10-02"
