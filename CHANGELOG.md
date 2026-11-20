@@ -39,6 +39,24 @@ version numbers; entries are dated.
 
 ### Changed
 
+- **A late brief posts with a warning instead of being refused.** The delivery gate used to refuse
+  whenever a release window or the opening bell fell between the pull time and the send time — which
+  also refused a perfectly good morning brief because the machine woke late. It now posts, with a
+  one-line banner at the top naming the pull and send times and what passed in between, and records
+  that fact in the delivery ledger. Broken provenance — stamp unreadable, not the block's own stamp,
+  prior day, or future — still refuses.
+- **A failed run announces itself.** Any non-zero exit posts a short notice to the same production
+  channels naming the stage, the reason and the exit code. It bypasses the freshness gate, is never
+  suppressed by `--dry`, and cannot change the run's exit code; if the notice cannot be sent, that is
+  logged. Weekends and holidays stay silent. Previously a failed run existed only as a log line and a
+  scheduler exit code — a miss on 2026-11-19 went unnoticed for a day.
+- **Bad data costs its section, not the brief.** A metric that fails its cross-check, or a source that
+  errors, is marked unpublishable in the data block; if the brief publishes it anyway, that section's
+  body is replaced with "Unavailable: <metric> — <reason>" and the post goes out. A claim copied
+  outside its section is removed one line at a time, and an emptied TL;DR becomes "Unavailable: see
+  sections." Every removal — the exact text, its offsets, the replacement and the reason — is written
+  to the run log and to a `validation` row in the delivery ledger, and the original brief can be
+  reconstructed from that record. The brief file on disk is never rewritten.
 - **The freshness stamp is checked, not decorated.** `validate` now parses `*Data pulled … ET*` and
   requires it to match the gathered block's `as_of_et` verbatim; a missing, unparsable or mismatched
   stamp stops validation (exit 5). `deliver_production` and `deliver_test` re-check freshness

@@ -129,17 +129,23 @@ post. Nothing reaches Discord. Exit code 0 means the whole chain works.
 .venv/Scripts/python.exe run_brief.py --deliver-only           # re-post today's existing brief
 ```
 
-Useful flags: `--date YYYY-MM-DD` to run for another session, `--skip-gather` to
-reuse the existing data block, `--force` to bypass the delivery ledger,
+Useful flags: `--skip-gather` to reuse the existing data block, `--deliver-only` to
+validate and post an existing brief, `--force` to bypass the delivery ledger,
 `--ignore-window` outside 07:30–08:30 Chicago, `--force-weekend`,
-`--force-holiday`.
+`--force-holiday`. `--date` selects which session's files are used, but live
+gathering only ever runs for today's ET date: asking for a past date without
+`--skip-gather` or `--deliver-only` is refused with exit 9, because gathering a
+past session is not supported and silently substituting today's data would be
+worse than refusing.
 
 Exit codes: 0 ok, 2 skipped (weekend or holiday), 3 gather, 4 compose,
-5 validation, 6 outside window, 7 delivery, 8 spend estimate reached.
+5 validation, 6 outside window, 7 delivery, 8 spend estimate reached, 9 a
+requested date live gathering cannot honour.
 
 A delivery that reaches some destinations but not all exits 7. The ledger records
-each destination separately, so the next run re-sends only the ones still
-missing — it does not duplicate the ones that worked.
+each destination separately — and, since 2026-11-20, each acknowledged message
+within a destination — so the next run re-sends only what is still missing rather
+than duplicating what already arrived.
 
 Weekends and NYSE holidays exit 2 without posting. Market holidays come from
 `market_holidays.yaml` (closures for 2026 and 2027). If that file is missing the
