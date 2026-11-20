@@ -21,6 +21,7 @@ import os
 import re
 import sys
 import time
+from collections.abc import Callable
 from datetime import UTC
 from pathlib import Path
 
@@ -61,21 +62,34 @@ def _strip_comments(md: str) -> str:
 
 
 def _split_long(section: str) -> list[str]:
-    """Hard-split a single oversize section by lines, keeping ``` code fences balanced
-    (close the fence at a break, reopen it on the next message). Rare safety net."""
+    """Split by lines, then words, reserving room to close/reopen code fences."""
     out: list[str] = []
-    buf, in_code = "", False
+    buf, fence = "", ""
     for ln in section.split("\n"):
+        is_fence = ln.lstrip().startswith("```")
+        next_fence = ("" if fence else ln.strip()) if is_fence else fence
+        closing = "\n```" if next_fence else ""
         candidate = ln if not buf else buf + "\n" + ln
-        if len(candidate) > LIMIT and buf:
-            out.append(buf + ("\n```" if in_code else ""))
-            buf = ("```\n" + ln) if in_code else ln
-        else:
-            buf = candidate
-        if ln.lstrip().startswith("```"):
-            in_code = not in_code
+        if len(candidate) + len(closing) > LIMIT and buf:
+            out.append(buf + ("\n```" if fence else ""))
+            buf = fence if fence else ""
+        prefix = buf + "\n" if buf else ""
+        if is_fence and len(prefix + ln) + len(closing) > LIMIT:
+            raise RuntimeError("Discord code fence cannot fit within chunk limit")
+        while len(prefix + ln) + len(closing) > LIMIT:
+            room = LIMIT - len(prefix) - len(closing)
+            if room <= 0:
+                raise RuntimeError("Discord code fence leaves no room for content")
+            # Keep whitespace as content; only an indivisible word is hard-split.
+            cut = max(ln.rfind(space, 0, room) for space in " \t\r\v\f")
+            cut = cut + 1 if cut >= 0 else room
+            out.append(prefix + ln[:cut] + closing)
+            ln = ln[cut:]
+            prefix = fence + "\n" if fence else ""
+        buf = prefix + ln
+        fence = next_fence
     if buf:
-        out.append(buf)
+        out.append(buf + ("\n```" if fence else ""))
     return out
 
 
@@ -175,10 +189,21 @@ def _webhooks_from_env() -> list[str]:
     return out
 
 
-def _post_one(webhook: str, msgs: list[str]) -> None:
+def _validate_chunks(msgs: list[str]) -> None:
+    """Preflight the entire destination before any message can reach transport."""
+    if not msgs or any(not m or len(m) > LIMIT for m in msgs):
+        raise RuntimeError(f"Discord chunks must contain 1..{LIMIT} characters")
+
+
+def _post_one(webhook: str, msgs: list[str], start: int = 0,
+              on_ack: Callable[[int], None] | None = None) -> None:
     """Send every chunk to ONE webhook, in order, with gentle pacing under the rate limit."""
-    for i, m in enumerate(msgs):
+    _validate_chunks(msgs)
+    for i in range(start, len(msgs)):
+        m = msgs[i]
         _send(webhook, m)
+        if on_ack is not None:
+            on_ack(i)
         if i < len(msgs) - 1:
             time.sleep(0.7)
 
@@ -245,7 +270,8 @@ def _resolve(webhook: str | list[str] | None) -> list[str]:
     return webhooks
 
 
-def post(brief_md: str, webhook: str | list[str] | None = None) -> str:
+def post(brief_md: str, webhook: str | list[str] | None = None, *, start: int = 0,
+         on_ack: Callable[[int], None] | None = None) -> str:
     """Post the brief to every configured Discord webhook (fan-out to N servers).
 
     `webhook` overrides the env (a single URL or a list); otherwise the URLs come from
@@ -255,18 +281,19 @@ def post(brief_md: str, webhook: str | list[str] | None = None) -> str:
     webhooks = _resolve(webhook)
 
     msgs = chunk(brief_md)
+    _validate_chunks(msgs)
     ok: list[str] = []
     failed: list[str] = []
     for w in webhooks:
         try:
-            _post_one(w, msgs)
+            _post_one(w, msgs, start, on_ack)
             ok.append(w)
         except (RuntimeError, requests.RequestException) as e:
             failed.append(w)
             print(f"  WARN Discord webhook failed ({fingerprint(w)}): {sanitize(str(e))}", flush=True)
     if not ok:
         raise RuntimeError(f"all {len(webhooks)} Discord webhook(s) failed")
-    summary = f"posted {len(msgs)} message(s) to {len(ok)}/{len(webhooks)} Discord webhook(s)"
+    summary = f"posted {len(msgs) - start} message(s) to {len(ok)}/{len(webhooks)} Discord webhook(s)"
     return summary + (f" — {len(failed)} FAILED" if failed else "")
 
 
