@@ -17,6 +17,7 @@ from pathlib import Path
 import config
 
 LEDGER = config.STATE / "delivery.jsonl"
+BANNER_ROOM = 800
 
 
 def _now() -> str:
@@ -45,7 +46,8 @@ def already_delivered(date: str, target: str) -> bool:
 
 
 def _record(date: str, target: str, status: str, detail: str, chunks: int = 0,
-            *, brief_id: str | None = None, chunk_index: int | None = None) -> None:
+            *, brief_id: str | None = None, chunk_index: int | None = None,
+            banner: str = "") -> None:
     from post_discord import sanitize
 
     LEDGER.parent.mkdir(parents=True, exist_ok=True)
@@ -55,12 +57,16 @@ def _record(date: str, target: str, status: str, detail: str, chunks: int = 0,
             "detail": sanitize(detail), "chunks": chunks, "at": _now(),
             **({"brief_id": brief_id} if brief_id is not None else {}),
             **({"chunk_index": chunk_index} if chunk_index is not None else {}),
+            "stale": bool(banner), "stale_reason": sanitize(banner),
         }) + "\n")
 
 
-def _chunks(md: str) -> list[str]:
+def _chunks(md: str, *, reserve: bool = False) -> list[str]:
     import post_discord
-    parts = post_discord.chunk(md)
+    # Fixed body boundaries, independent of the clock: a retry can prepend its
+    # current warning to the first outstanding chunk without replaying any ack.
+    parts = (post_discord.chunk(md, limit=post_discord.LIMIT - BANNER_ROOM)
+             if reserve or post_discord._parse_stamp(md) is not None else post_discord.chunk(md))
     post_discord._validate_chunks(parts)
     return parts
 
@@ -100,11 +106,10 @@ def _progress(date: str, target: str, brief_id: str, count: int,
 
 
 def _freshness_failure(md: str, date: str) -> str | None:
-    """Fail closed, then reuse the standalone release/open crossing policy.
+    """Fail closed on broken provenance or an unreadable event calendar.
 
-    There is no elapsed-minutes threshold: a block becomes stale when it crosses
-    a release/open boundary. Prior-day and future stamps cannot establish current
-    freshness, even though the standalone CLI deliberately stays quiet for them.
+    Release/open crossings alone are labelled at send time, never refused.
+    Prior-day and future stamps still cannot establish trustworthy provenance.
     """
     import post_discord
     import validate
@@ -131,11 +136,61 @@ def _freshness_failure(md: str, date: str) -> str | None:
                 return "could not determine freshness: event calendar incomplete"
             for event in events:
                 datetime.strptime(event["time_et"], "%H:%M")
-        if post_discord.stale_check(md):
-            return "stale block: release or market-open boundary crossed; gather and rewrite"
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
         return f"could not determine freshness: {type(exc).__name__}"
     return None
+
+
+def _banner(md: str, date: str) -> str:
+    import post_discord as post
+
+    stamp = post._parse_stamp(md)
+    if stamp is None:  # Transport-only tests may stub the provenance gate.
+        return ""
+    now = post._now_et()
+    payload = json.loads((config.DATA / f"{date}.json").read_text(encoding="utf-8"))
+    gate = payload["event_gate"]
+    events = [(e["time_et"], e.get("name", "scheduled release"))
+              for e in gate["today_events"] + gate["today_tier2"]]
+    boundaries = post.crossed_boundaries(stamp, now, events)
+    return post.stale_banner(stamp, now, boundaries) if boundaries else ""
+
+
+def _plan(md: str, date: str, target: str, force: bool) -> tuple[str, list[str], str, str]:
+    """Identify body progress independently of the send-time warning."""
+    import post_discord
+
+    parts = _chunks(md)
+    # Preserve progress written before banner room was reserved. Re-chunk only
+    # the unacknowledged old suffix, never replay its acknowledged prefix.
+    original = post_discord.chunk(md)
+    old_id = _identity(md, original)
+    rows = [r for r in _rows() if r.get("date") == date and r.get("target") == target]
+    full_id = _identity(md, parts)
+    modern_full = any(r.get("brief_id") == full_id and "stale" in r for r in rows)
+    old_rows = [r for r in rows if r.get("brief_id") == old_id and "stale" not in r]
+    if old_rows and not modern_full and not force and original != parts:
+        start = _progress(date, target, old_id, len(original))
+        if start == len(original):
+            return md, original, old_id, ""
+        if start:
+            parts = _chunks("\n\n".join(original[start:]), reserve=True)
+    brief_id = _identity(md, parts)
+    banner = _banner(md, date)
+    wire = banner + "\n\n" + md if banner else md
+    return wire, parts, brief_id, banner
+
+
+def _with_banner(parts: list[str], banner: str, start: int) -> list[str]:
+    import post_discord
+
+    wire_parts = parts.copy()
+    if banner and start < len(parts):
+        # Keep the full reason in the ledger; bound only the visible envelope.
+        visible = banner if len(banner) <= BANNER_ROOM - 2 else banner[:BANNER_ROOM - 5] + "..."
+        wire_parts[start] = visible + "\n\n" + parts[start]
+    post_discord._validate_chunks(wire_parts)
+    return wire_parts
 
 
 def deliver_production(md: str, date: str, force: bool = False) -> tuple[bool, str]:
@@ -151,40 +206,46 @@ def deliver_production(md: str, date: str, force: bool = False) -> tuple[bool, s
         _record(date, "production", "failed", repr(exc))
         return False, f"production delivery failed: {post_discord.sanitize(str(exc))}"
 
-    try:
-        parts = _chunks(md)
-    except RuntimeError as exc:
-        return False, f"production delivery failed: {exc}"
-    brief_id = _identity(md, parts)
     failed: list[str] = []
     sent = 0
     messages_sent = 0
+    stale_reasons: set[str] = set()
     for webhook in webhooks:
         target = "production:" + post_discord.fingerprint(webhook)
+        try:
+            wire, parts, brief_id, banner = _plan(md, date, target, force)
+        except RuntimeError as exc:
+            return False, f"production delivery failed: {exc}"
         start = 0 if force else _progress(date, target, brief_id, len(parts), ("production",))
         if start == len(parts):
             continue
         try:
             if force:
-                _record(date, target, "started", "forced delivery", len(parts), brief_id=brief_id)
+                _record(date, target, "started", "forced delivery", len(parts), brief_id=brief_id, banner=banner)
 
-            def acknowledge(index: int, destination: str = target) -> None:
-                _record(date, destination, "chunk_ok", "acknowledged", len(parts),
-                        brief_id=brief_id, chunk_index=index)
+            def acknowledge(index: int, destination: str = target, count: int = len(parts),
+                            identity: str = brief_id, warning: str = banner) -> None:
+                _record(date, destination, "chunk_ok", "acknowledged", count,
+                        brief_id=identity, chunk_index=index, banner=warning)
 
-            summary = post_discord.post(md, webhook=webhook, start=start, on_ack=acknowledge)
+            if banner:
+                stale_reasons.add(banner)
+            summary = post_discord.post(wire, webhook=webhook, start=start, on_ack=acknowledge,
+                                        parts=_with_banner(parts, banner, start))
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-            _record(date, target, "failed", repr(exc), len(parts), brief_id=brief_id)
+            _record(date, target, "failed", repr(exc), len(parts), brief_id=brief_id, banner=banner)
             failed.append(target)
         else:
-            _record(date, target, "ok", summary, len(parts), brief_id=brief_id)
+            _record(date, target, "ok", summary, len(parts), brief_id=brief_id, banner=banner)
             sent += 1
             messages_sent += len(parts) - start
     if failed:
-        return False, "production delivery failed; outstanding destinations: " + ", ".join(failed)
+        return False, "production delivery failed; outstanding destinations: " + ", ".join(failed) + (
+            "; stale: " + " | ".join(sorted(stale_reasons)) if stale_reasons else "")
     if not sent:
         return True, "already delivered to production (ledger)"
-    return True, f"posted {messages_sent} message(s) to {sent} production destination(s)"
+    return True, f"posted {messages_sent} message(s) to {sent} production destination(s)" + (
+        "; stale: " + " | ".join(sorted(stale_reasons)) if stale_reasons else "")
 
 
 def deliver_test(md: str, date: str, channel_id: str, force: bool = False) -> tuple[bool, str]:
@@ -193,18 +254,18 @@ def deliver_test(md: str, date: str, channel_id: str, force: bool = False) -> tu
     failure = _freshness_failure(md, date)
     if failure:
         return False, failure
+    target = "test:" + channel_id
     try:
-        parts = _chunks(md)
+        _wire, parts, brief_id, banner = _plan(md, date, target, force)
     except RuntimeError as exc:
         return False, f"test delivery failed: {exc}"
-    brief_id = _identity(md, parts)
-    target = "test:" + channel_id
     start = 0 if force else _progress(date, target, brief_id, len(parts), ("test",))
     if start == len(parts):
         return True, "already delivered to test channel (ledger)"
+    parts = _with_banner(parts, banner, start)
     config.STATE.mkdir(parents=True, exist_ok=True)
     if force:
-        _record(date, target, "started", "forced delivery", len(parts), brief_id=brief_id)
+        _record(date, target, "started", "forced delivery", len(parts), brief_id=brief_id, banner=banner)
     for index in range(start, len(parts)):
         i, part = index + 1, parts[index]
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md",
@@ -218,17 +279,18 @@ def deliver_test(md: str, date: str, channel_id: str, force: bool = False) -> tu
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            _record(date, target, "failed", repr(exc), len(parts), brief_id=brief_id)
+            _record(date, target, "failed", repr(exc), len(parts), brief_id=brief_id, banner=banner)
             return False, f"test delivery failed on chunk {i}/{len(parts)}"
         finally:
             tmp_path.unlink(missing_ok=True)
         if proc.returncode != 0:
             reason = sanitize(proc.stderr.strip())[:300]
             _record(date, target, "failed", f"chunk {i}/{len(parts)}: {reason}",
-                    len(parts), brief_id=brief_id)
+                    len(parts), brief_id=brief_id, banner=banner)
             return False, f"test delivery failed on chunk {i}/{len(parts)}"
         _record(date, target, "chunk_ok", "acknowledged", len(parts),
-                brief_id=brief_id, chunk_index=index)
+                brief_id=brief_id, chunk_index=index, banner=banner)
     _record(date, target, "ok", f"sent {len(parts)} chunk(s) to test channel",
-            len(parts), brief_id=brief_id)
-    return True, f"sent {len(parts) - start} message(s) to the test channel"
+            len(parts), brief_id=brief_id, banner=banner)
+    return True, f"sent {len(parts) - start} message(s) to the test channel" + (
+        f"; stale: {banner}" if banner else "")

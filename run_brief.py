@@ -2,8 +2,9 @@
 
 Exit codes are meaningful so Task Scheduler and a human both see the real outcome:
 
-    0  posted, or a dry run that passed every check
-    2  skipped (weekend)
+    0  posted (possibly labelled stale), or a dry run that passed every check
+    1  unexpected exception or invalid arguments/configuration
+    2  skipped (weekend or NYSE holiday)
     3  gather failed
     4  compose failed
     5  validation failed
@@ -11,6 +12,9 @@ Exit codes are meaningful so Task Scheduler and a human both see the real outcom
     7  delivery failed
     8  monthly spend estimate reached
     9  requested date unsupported for live gathering (today ET only)
+
+Every failure (except skip code 2) attempts a production Discord alert, even
+with --dry or --test. Alert failure never changes the original exit code.
 
 NYSE holidays are detected from `market_holidays.yaml` (2026-2027 closures and
 early closes): a listed holiday exits 2 without posting, an early close is logged.
@@ -35,7 +39,7 @@ ET = ZoneInfo("America/New_York")
 WINDOW = (7 * 60 + 30, 8 * 60 + 30)  # 07:30-08:30 Chicago
 
 
-def _log(msg: str, fh) -> None:
+def _write_log(msg: str, fh) -> None:
     line = f"{dt.datetime.now(CHI):%Y-%m-%d %H:%M:%S} {msg}"
     print(line, flush=True)
     fh.write(line + "\n")
@@ -88,10 +92,51 @@ def _record_spend(date: str, usd: float) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    state = {"stage": "setup", "reason": "run failed", "log_path": None, "partial": False}
+    try:
+        code = _run(argv, state)
+    except SystemExit as exc:
+        if not exc.code:  # argparse --help
+            return 0
+        code = 1
+        state["reason"] = "invalid command-line arguments"
+    except Exception as exc:  # noqa: BLE001 - central failure reporting
+        code = 1
+        # Exception messages may contain arbitrary vendor credentials. Keep the
+        # type, not the response body, for unexpected failures.
+        state["reason"] = f"unexpected {type(exc).__name__}"
+    if code not in (0, 2):
+        post_discord = None
+        try:
+            import post_discord
+
+            if not state.get("env_loaded"):
+                config.load_env()
+            detail = post_discord.alert_failure(state["stage"], state["reason"], code,
+                                                partial=state["partial"])
+        except Exception as exc:  # noqa: BLE001 - preserve the original outcome
+            reason = post_discord.sanitize(str(exc)) if post_discord is not None else type(exc).__name__
+            detail = f"failure alert failed: {reason}"
+        try:
+            if state["log_path"] is not None:
+                with state["log_path"].open("a", encoding="utf-8") as fh:
+                    _write_log(detail, fh)
+            else:
+                print(detail, flush=True)
+        except OSError:
+            print(detail, file=sys.stderr, flush=True)
+    return code
+
+
+def _run(argv: list[str] | None, state: dict) -> int:
+    def _log(msg: str, fh) -> None:
+        state["reason"] = msg
+        _write_log(msg, fh)
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--date", help="YYYY-MM-DD (default: today, ET); other dates require existing artifacts")
-    ap.add_argument("--dry", action="store_true", help="run and check, print the split, post nothing")
-    ap.add_argument("--test", action="store_true", help="deliver to the configured test channel")
+    ap.add_argument("--dry", action="store_true", help="preview the brief; failures still alert production")
+    ap.add_argument("--test", action="store_true", help="brief to test channel; failures still alert production")
     ap.add_argument("--force-weekend", action="store_true", help="run even on a Saturday or Sunday")
     ap.add_argument("--force-holiday", action="store_true", help="run even on a listed NYSE holiday")
     ap.add_argument("--ignore-window", action="store_true", help="run outside 07:30-08:30 Chicago")
@@ -103,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
 
     config.ensure_dirs()
     config.load_env()
+    state["env_loaded"] = True
     settings = config.load_settings()
 
     date = args.date or dt.datetime.now(ET).date().isoformat()
@@ -110,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
     display = validate.display_date(day)
 
     log_path = config.LOGS / f"{date}.log"
+    state["log_path"] = log_path
     with log_path.open("a", encoding="utf-8", errors="replace") as fh:
         _log(f"run start date={date} dry={args.dry} test={args.test}", fh)
 
@@ -157,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
         payload: dict = {}
 
         if args.deliver_only:
+            state["stage"] = "validate"
             _log("deliver-only: reusing the existing brief", fh)
             if not out.exists():
                 _log(f"no brief at {out}", fh)
@@ -169,6 +217,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 8
 
             # --- gather ---------------------------------------------------
+            state["stage"] = "gather"
             if args.skip_gather and data_json.exists():
                 _log("gather skipped; reusing existing data block", fh)
             else:
@@ -187,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:
             payload = json.loads(data_json.read_text(encoding="utf-8"))
 
             # --- compose --------------------------------------------------
+            state["stage"] = "compose"
             ok, detail = __import__("compose").run(date, data_md, out, log_path)
             _record_spend(date, per_run)
             if not ok:
@@ -198,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"data as_of_et={payload.get('as_of_et')} gex_warning={bool(warning)}", fh)
 
         # --- validate -----------------------------------------------------
+        state["stage"] = "validate"
         brief = out.read_text(encoding="utf-8")
         errors, warnings = validate.check(
             brief, date, display, int(settings.get("brief", {}).get("max_chars", 5200)), warning,
@@ -222,6 +273,7 @@ def main(argv: list[str] | None = None) -> int:
             _log("WARN no claims ledger for this run", fh)
 
         # --- deliver ------------------------------------------------------
+        state["stage"] = "deliver"
         if args.dry:
             import post_discord
             parts = post_discord.chunk(brief)
@@ -237,11 +289,14 @@ def main(argv: list[str] | None = None) -> int:
             if not channel:
                 _log("no test_channel_id configured", fh)
                 return 7
+            state["partial"] = True  # An exception may follow accepted messages.
             ok, detail = deliver.deliver_test(brief, date, channel, force=args.force)
         else:
+            state["partial"] = True
             ok, detail = deliver.deliver_production(brief, date, force=args.force)
 
         if not ok:
+            state["partial"] = ("outstanding destinations:" in detail or "on chunk" in detail)
             _log(f"delivery failed: {detail}", fh)
             return 7
         _log(f"delivered: {detail}", fh)

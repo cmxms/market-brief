@@ -61,7 +61,7 @@ def _strip_comments(md: str) -> str:
     return re.sub(r"\n?<!--.*?-->\n?", "\n", md, flags=re.DOTALL)
 
 
-def _split_long(section: str) -> list[str]:
+def _split_long(section: str, limit: int = LIMIT) -> list[str]:
     """Split by lines, then words, reserving room to close/reopen code fences."""
     out: list[str] = []
     buf, fence = "", ""
@@ -70,14 +70,14 @@ def _split_long(section: str) -> list[str]:
         next_fence = ("" if fence else ln.strip()) if is_fence else fence
         closing = "\n```" if next_fence else ""
         candidate = ln if not buf else buf + "\n" + ln
-        if len(candidate) + len(closing) > LIMIT and buf:
+        if len(candidate) + len(closing) > limit and buf:
             out.append(buf + ("\n```" if fence else ""))
             buf = fence if fence else ""
         prefix = buf + "\n" if buf else ""
-        if is_fence and len(prefix + ln) + len(closing) > LIMIT:
+        if is_fence and len(prefix + ln) + len(closing) > limit:
             raise RuntimeError("Discord code fence cannot fit within chunk limit")
-        while len(prefix + ln) + len(closing) > LIMIT:
-            room = LIMIT - len(prefix) - len(closing)
+        while len(prefix + ln) + len(closing) > limit:
+            room = limit - len(prefix) - len(closing)
             if room <= 0:
                 raise RuntimeError("Discord code fence leaves no room for content")
             # Keep whitespace as content; only an indivisible word is hard-split.
@@ -93,7 +93,7 @@ def _split_long(section: str) -> list[str]:
     return out
 
 
-def chunk(brief_md: str) -> list[str]:
+def chunk(brief_md: str, *, limit: int = LIMIT) -> list[str]:
     """Split the brief into <=LIMIT-char messages on `## ` section boundaries.
     The title + TL;DR ride in the first chunk; each section packs in greedily."""
     brief_md = _strip_comments(brief_md)
@@ -114,12 +114,12 @@ def chunk(brief_md: str) -> list[str]:
     for sec in (s.strip("\n") for s in sections):
         if not sec:
             continue
-        if len(sec) > LIMIT:
+        if len(sec) > limit:
             if buf:
                 msgs.append(buf)
                 buf = ""
-            msgs.extend(_split_long(sec))
-        elif buf and len(buf) + 2 + len(sec) > LIMIT:
+            msgs.extend(_split_long(sec, limit))
+        elif buf and len(buf) + 2 + len(sec) > limit:
             msgs.append(buf)
             buf = sec
         else:
@@ -271,7 +271,7 @@ def _resolve(webhook: str | list[str] | None) -> list[str]:
 
 
 def post(brief_md: str, webhook: str | list[str] | None = None, *, start: int = 0,
-         on_ack: Callable[[int], None] | None = None) -> str:
+         on_ack: Callable[[int], None] | None = None, parts: list[str] | None = None) -> str:
     """Post the brief to every configured Discord webhook (fan-out to N servers).
 
     `webhook` overrides the env (a single URL or a list); otherwise the URLs come from
@@ -280,7 +280,7 @@ def post(brief_md: str, webhook: str | list[str] | None = None, *, start: int = 
     we only raise if EVERY webhook failed — so adding a friend's server can't break your own feed."""
     webhooks = _resolve(webhook)
 
-    msgs = chunk(brief_md)
+    msgs = chunk(brief_md) if parts is None else parts
     _validate_chunks(msgs)
     ok: list[str] = []
     failed: list[str] = []
@@ -384,6 +384,42 @@ def _calendar_events_today(day) -> list[tuple[str, str]]:
         return [(e.get("time_et", "??:??"), e.get("name", "?"))
                 for e in (eg.get("today_events") or []) + (eg.get("today_tier2") or [])]
     return []
+
+
+def crossed_boundaries(stamp, now, events) -> list[tuple[str, str]]:
+    """Release windows, known events and the open in (pull, send], all ET."""
+    def in_gap(hhmm):
+        h, m = (int(x) for x in hhmm.split(":"))
+        return stamp < stamp.replace(hour=h, minute=m, second=0, microsecond=0) <= now
+
+    candidates = [*events, *_RELEASE_CLOCK, (_MARKET_OPEN, "market open")]
+    return sorted({(t, n) for t, n in candidates if in_gap(t)})
+
+
+def stale_banner(stamp, now, boundaries) -> str:
+    reason = "; ".join(f"{t} ET {' '.join(n.split())}" for t, n in boundaries)
+    return (f"⚠ STALE DATA — pulled {stamp:%Y-%m-%d %H:%M} ET; "
+            f"sending {now:%Y-%m-%d %H:%M} ET. "
+            f"A release window or the open has passed since the pull: {reason}.")
+
+
+def alert_failure(stage: str, reason: str, code: int, *, partial: bool = False) -> str:
+    """Independent production fan-out: no freshness gate, ledger, or dry switch."""
+    reason = " ".join(sanitize(reason).split())[:500]
+    outcome = ("Delivery may be partial; check the delivery ledger." if partial else
+               "Nothing was posted.")
+    message = f"Market brief failed — {stage}: {reason} Exit code {code}. {outcome}"
+    parts = chunk(message)
+    _validate_chunks(parts)
+    failed = []
+    for webhook in _resolve(None):
+        try:
+            _post_one(webhook, parts)
+        except Exception as exc:  # noqa: BLE001 - attempt every destination
+            failed.append(f"{fingerprint(webhook)}: {sanitize(str(exc))}")
+    if failed:
+        raise RuntimeError("failure alert not posted to " + "; ".join(failed))
+    return message
 
 
 def stale_check(brief_md: str) -> bool:

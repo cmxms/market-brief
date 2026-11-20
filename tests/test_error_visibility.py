@@ -188,6 +188,7 @@ def test_unreadable_archive_preserves_original(monkeypatch, tmp_path):
 
 
 def test_gather_failure_stops_before_compose_or_delivery(monkeypatch, tmp_path):
+    monkeypatch.setattr(P, "alert_failure", Mock())
     # Exercise a permitted live date; historical dates are now refused earlier.
     date = dt.datetime.now(R.ET).date().isoformat()
     monkeypatch.setattr(config, "ensure_dirs", lambda: None)
