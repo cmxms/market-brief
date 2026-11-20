@@ -26,6 +26,19 @@ version numbers; entries are dated.
 
 ### Changed
 
+- **The freshness stamp is checked, not decorated.** `validate` now parses `*Data pulled … ET*` and
+  requires it to match the gathered block's `as_of_et` verbatim; a missing, unparsable or mismatched
+  stamp stops validation (exit 5). `deliver_production` and `deliver_test` re-check freshness
+  immediately before sending, reusing the standalone stale-check's release/market-open boundary
+  policy, and refuse a prior-day or future stamp. "Could not determine freshness" is its own
+  refusal, never a pass, and `--force` does not override it. Verified against live artifacts: a
+  matched 9:59 AM block passed the stamp check and was then refused at 10:25 for crossing the 10:00
+  release window.
+- **An unavailable gamma read can no longer be published as a regime call.** A GEX failure of any
+  shape — symbol-level error, missing chain, nested warning — is normalized by `run_brief` and
+  carried into validation, which requires the disclosure inside the Regime read section and rejects
+  a gamma regime/direction/flip claim anywhere in the brief. An unrelated "unavailable" sentence no
+  longer satisfies the check.
 - **The writer is told to write once, not to whittle.** The compose prompt previously gave only
   the 5,200-character ceiling, so a long draft was trimmed with 20+ `patch` edits — 23 of them on
   11-19, against 11-12 on a normal day. It now aims at `brief.target_chars` (4,800, a new setting)
@@ -60,14 +73,14 @@ version numbers; entries are dated.
   pipeline, rules, storage, exit codes — so two copies of the same contract were free to drift.
   What remains is what a coding agent actually needs and cannot get elsewhere: `README.md` is
   authoritative, the compose step never posts, never invent a number, and a failed validation is
-  not published. Workspace-wide rules stay in `CMXMS/AGENTS.md`.
+  not published. Workspace-wide rules stay outside this repository.
 - **README documents the missing-calendar behavior.** A missing `market_holidays.yaml` warns
   and continues rather than refusing to run; that fact used to live only in `AGENTS.md`.
 
 ### Removed
 
 - **`BACKLOG.md` deleted.** The file existed only to announce that it was empty, and pointed at
-  `CMXMS/WORKLIST.md`, a path no reader of this repository can see. Its content was internal
+  a to-do list outside this repository, which no reader here can see. Its content was internal
   housekeeping in a public repo. The retirement rationale is in the 2026-11-17 entry below; the
   file itself remains in git history.
 
@@ -95,8 +108,8 @@ version numbers; entries are dated.
 - **`BACKLOG.md` retired: 170 lines down to 26.** Every remaining entry was fixed, moot, or too
   small to keep tracking, and two sections already had a better owner — the ISM / Fed-speaker
   sweep is a run-time procedure documented in `playbook.md` step 2, and the calendar entries are
-  in `t1_calendar.yaml`. Open work for this project now goes on the workspace list
-  (`CMXMS/WORKLIST.md`), which is the one list that gets read. The four still-real imperfections
+  in `t1_calendar.yaml`. Open work for this project now goes on the operator's single workspace
+  to-do list, which is the one list that gets read. The four still-real imperfections
   were carried over there rather than dropped; the full reasoning for every closed item stays in
   git history.
 

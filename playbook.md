@@ -1,6 +1,6 @@
-# Market Brief — Playbook (for Claude)
+# Market Brief — Playbook (for the writer)
 
-When the user says **"market brief"**, **"morning brief"**, **"daily brief"**, or
+When the operator says **"market brief"**, **"morning brief"**, **"daily brief"**, or
 **"community brief"**, follow these steps exactly. The brief is **general situational
 awareness** for traders — what happened, what's rotating, where the gamma/vol regime
 sits, and what's on the event calendar. It is **not** personal and gives **no** buy/sell
