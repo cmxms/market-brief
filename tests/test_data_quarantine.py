@@ -25,6 +25,7 @@ STAMP = "Fri Nov 20, 2026 8:35 AM ET"
 # claims to exercise section-only repair independently of the copied-claim guard.
 BRIEF = (ROOT / "briefs" / f"{DATE}.md").read_text(encoding="utf-8").replace(
     ", and dealers are short gamma far below the flip", "").replace("a 31 VIX plus ", "")
+BRIEF = BRIEF.rstrip() + "\n-# Run: " + "a" * 32
 
 
 @pytest.fixture(autouse=True)
@@ -51,7 +52,7 @@ def isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(D.subprocess, "run", forbidden)
     send = Mock()
     monkeypatch.setattr(P, "_send", send)
-    payload = {"date": DATE, "as_of": "2026-11-20T08:35:00-05:00", "as_of_et": STAMP,
+    payload = {"run_id": "a" * 32, "date": DATE, "as_of": "2026-11-20T08:35:00-05:00", "as_of_et": STAMP,
                "event_gate": {"today_events": [], "today_tier2": []},
                "gex": {s: {v: {"regime": "positive"} for v in ("near_term", "full_chain")}
                        for s in ("SPY", "QQQ")}}

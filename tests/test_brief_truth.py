@@ -51,12 +51,12 @@ def isolated(monkeypatch, tmp_path):
         pytest.fail("unexpected network")
 
     monkeypatch.setattr(P.requests.sessions.Session, "request", forbidden)
-    payload = {"as_of_et": STAMP, "gex": healthy_gex(),
+    payload = {"run_id": "a" * 32, "as_of_et": STAMP, "gex": healthy_gex(),
                "event_gate": {"today_events": [], "today_tier2": []}}
 
     def save(brief=BRIEF):
         (tmp_path / f"{DATE}.json").write_text(json.dumps(payload), encoding="utf-8")
-        (tmp_path / f"{DATE}.md").write_text(brief, encoding="utf-8")
+        (tmp_path / f"{DATE}.md").write_text(brief + "\n-# Run: " + "a" * 32, encoding="utf-8")
 
     save()
     return payload, save, post, child
@@ -130,6 +130,7 @@ def test_disclosed_missing_feed_delivered_without_claim(isolated):
 def test_direct_delivery_unknown_or_stale_refused(isolated, defect, test_channel):
     payload, save, post, child = isolated
     brief = BRIEF
+    payload.pop("run_id")  # This test isolates the stamp gate's legacy compatibility.
     path = config.DATA / f"{DATE}.json"
     if defect == "calendar":
         payload["event_gate"] = {"error": "synthetic calendar failure"}
@@ -225,7 +226,8 @@ def test_unrelated_unavailable_inside_regime_not_disclosure():
 def test_undisclosed_symbol_failure_quarantines_claims_before_posting(isolated):
     payload, save, post, child = isolated
     payload["gex"]["SPY"] = {"error": "synthetic symbol failure"}
-    save(historical())
+    # Leave room for the visible trace; this test exercises quarantine, not length.
+    save(historical().replace("Range-bound since July. ", "").replace(" Range-bound since July.", ""))
     assert run() == 0
     assert post.call_count
     wire = post.call_args.args[0]
