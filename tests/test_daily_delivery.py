@@ -96,7 +96,9 @@ def test_stale_posts_banner_ledger_log_and_unchanged_file(isolated, monkeypatch,
     assert all(len(c.args[1]) <= P.LIMIT for c in send.call_args_list)
     assert all("market-brief complete:" not in c.args[1] for c in send.call_args_list)
     assert all(r["stale"] and expected in r["stale_reason"] for r in rows())
-    assert all(r["status"] == "ok" for r in rows() if r["status"] != "chunk_ok")
+    # A split layout is durably planned before either fragment can be sent.
+    assert all(r["status"] in {"planned", "chunk_ok", "ok"} for r in rows())
+    assert rows()[-1]["status"] == "ok"
     assert "stale:" in (path / f"{DATE}.log").read_text(encoding="utf-8")
     assert expected in (path / f"{DATE}.log").read_text(encoding="utf-8")
     assert hashlib.sha256((path / f"{DATE}.md").read_bytes()).hexdigest() == before
