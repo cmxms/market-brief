@@ -10,8 +10,8 @@ Three things matter more than anything else here:
 - Never invent a number, and never put a link or citation in the brief.
 - A brief that fails validation is not published; the run exits non-zero instead.
 
-Workspace-wide rules — how work is approved, what may be pushed — live outside this
-repository, in `CMXMS/AGENTS.md`.
+Workspace-wide rules — how work is approved, what may be pushed — belong to the operator's
+own environment and are not part of this repository. Nothing here assumes you have them.
 
 This repository is public, so everything in it has to make sense to a stranger: no local
 paths, no references to documents or systems they cannot see, and a README that gets them
