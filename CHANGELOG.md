@@ -4,6 +4,30 @@ Notable changes to market-brief, newest first. Format follows
 [Keep a Changelog](https://keepachangelog.com/). This project does not publish
 version numbers; entries are dated.
 
+## 2026-11-20
+
+### Fixed
+
+- **A finished brief was thrown away because the writer ran out of turns.** On 2026-11-19
+  `hermes` exited 1 after spending its 40-turn budget, and `compose.run()` treated any non-zero
+  exit as failure even though both output files had been written — so the run exited 4 and
+  nothing was posted. The exit code was the only signal available: hermes prints no cause, and
+  the turn-cap notice appears in the session transcript, not in the child's stdout. `compose.run()`
+  now judges the work instead: a non-zero exit is recovered when the brief and the claims ledger
+  were both written by this run and the brief is above a stub size, and the brief then faces
+  `validate.py` as usual. Everything else — no brief, an unwritten brief, a brief under 1,500
+  bytes, a missing ledger — is still a hard failure. Regression tests cover each case.
+
+### Changed
+
+- **The writer is told to write once, not to whittle.** The compose prompt previously gave only
+  the 5,200-character ceiling, so a long draft was trimmed with 20+ `patch` edits — 23 of them on
+  11-19, against 11-12 on a normal day. It now aims at `brief.target_chars` (4,800, a new setting)
+  and is told to write each file in one `write_file` call and leave it.
+- **The prompt states the title-line format.** The 11-19 brief opened `Thu Nov 19, 2026`; the
+  playbook requires the full month, and validation rejects the abbreviation. The writer now gets
+  the exact shape instead of having to infer it from `playbook.md`.
+
 ## 2026-11-18
 
 ### Changed

@@ -153,7 +153,7 @@ def test_success_keeps_command_and_output_contract(composer):
     assert "Never silently omit a failed section" in prompt
 
 
-def test_nonzero_exit_rejects_even_a_fresh_brief(composer):
+def test_nonzero_exit_rejects_a_stub_brief(composer):
     run, process, out, _ = composer
 
     def failed_child(*args, **kwargs):
@@ -161,5 +161,75 @@ def test_nonzero_exit_rejects_even_a_fresh_brief(composer):
         return Mock(returncode=7, stdout="", stderr="failed")
 
     process.side_effect = failed_child
-    assert run() == (False, "compose failed (hermes exit 7)")
+    assert run() == (False, "compose failed (hermes exit 7); brief is only 10 bytes")
     assert process.call_args.kwargs["check"] is False
+
+
+TURN_CAP = ("You've reached the maximum number of tool-calling iterations allowed. "
+            "Please provide a final response summarizing what you've found.")
+BODY = "x" * 2000
+
+
+def _capped(out, *, brief=BODY, ledger=True, exit_code=1):
+    def child(*args, **kwargs):
+        if brief is not None:
+            out.write_text(brief, encoding="utf-8")
+        if ledger:
+            (config.STATE / f"claims-{DATE}.json").write_text("[]", encoding="utf-8")
+        return Mock(returncode=exit_code, stdout=f"...\n{TURN_CAP}\nBoth files are written.", stderr="")
+
+    return child
+
+
+def test_nonzero_exit_with_both_files_written_goes_to_validation(composer):
+    run, process, out, log = composer
+    process.side_effect = _capped(out)
+    ok, detail = run()
+    assert ok is True
+    assert "recovered from hermes exit 1 with finished files" in detail
+    assert f"{len(BODY)} bytes" in detail
+    assert detail in log.read_text(encoding="utf-8")
+
+
+def test_nonzero_exit_without_a_ledger_still_fails(composer):
+    run, process, out, _ = composer
+    process.side_effect = _capped(out, ledger=False)
+    assert run() == (False, "compose failed (hermes exit 1); no claims ledger written by this run")
+
+
+def test_nonzero_exit_with_a_stale_ledger_still_fails(composer):
+    run, process, out, _ = composer
+    ledger = config.STATE / f"claims-{DATE}.json"
+    ledger.write_text("[]", encoding="utf-8")
+    stale = ledger.stat().st_mtime - 3600
+    os.utime(ledger, (stale, stale))
+    process.side_effect = _capped(out, ledger=False)
+    assert run() == (False, "compose failed (hermes exit 1); no claims ledger written by this run")
+
+
+def test_nonzero_exit_with_a_stub_brief_still_fails(composer):
+    run, process, out, _ = composer
+    process.side_effect = _capped(out, brief="partial")
+    assert run() == (False, "compose failed (hermes exit 1); brief is only 7 bytes")
+
+
+def test_nonzero_exit_with_an_unrewritten_brief_still_fails(composer):
+    run, process, out, _ = composer
+    out.write_text(BODY, encoding="utf-8")
+    stale = out.stat().st_mtime - 3600
+    os.utime(out, (stale, stale))
+    (config.STATE / f"claims-{DATE}.json").write_text("[]", encoding="utf-8")
+    process.return_value = Mock(returncode=1, stdout=TURN_CAP, stderr="")
+    assert run() == (False, "brief file was not rewritten by this run")
+
+
+def test_prompt_asks_for_one_pass_at_the_target_length(composer):
+    run, _, _, _ = composer
+    run()
+    prompt = (config.STATE / f"prompt-{DATE}.txt").read_text(encoding="utf-8")
+    assert "Aim for about 4800 characters and stay under 5200" in prompt
+    assert "ONE `write_file` call" in prompt
+    assert "shave it with `patch`" in prompt
+    assert "Two write calls in total" in prompt
+    assert "{weekday} {full month}" in prompt      # format placeholders are escaped
+    assert "Thu November 19, 2026" in prompt

@@ -14,6 +14,9 @@ run_budget_seconds = 900
 [brief]
 # Hard limit on the finished brief; validation rejects anything longer.
 max_chars = 5200
+# What the writer is told to aim for, so it lands under the ceiling in one pass
+# instead of trimming with repeated edits (which burns the turn budget).
+target_chars = 4800
 # Brief used as the house-style reference in the compose prompt.
 reference = "2026-07-14.md"
 
