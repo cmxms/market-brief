@@ -16,6 +16,10 @@ from pathlib import Path
 
 import config
 
+# Below this a file is a stub, not a brief. A non-zero exit then stays a failure
+# instead of becoming something validate.py gets to judge.
+MIN_PLAUSIBLE_BYTES = 1500
+
 PROMPT = """You are writing today's market brief for {date}.
 
 Read these files first, in this order:
@@ -42,8 +46,15 @@ Rules that override everything else:
 - Never invent a number. If a figure is missing, leave it out or say it is unavailable.
 - If a gathered section is unavailable, say so and include its stated reason in the
   corresponding brief section. Never silently omit a failed section.
-- Stay under {max_chars} characters.
+- Aim for about {target_chars} characters and stay under {max_chars}. The ceiling is a
+  hard limit that validation enforces; the target is what you write to first time.
+- Write the brief in ONE `write_file` call, complete and already short enough. Do not
+  write it long and then shave it with `patch` edits: one pass, then leave it alone.
+- Then write the claims ledger in ONE `write_file` call. Two write calls in total.
+  Spend the rest of your turns on reading sources before you write, not on editing after.
 - Keep the canonical section headers and their order exactly as playbook.md fixes them.
+- The title line is exactly `# 📊 Market Brief — {{weekday}} {{full month}} {{D}}, {{YYYY}}` with the
+  month spelled out (e.g. `Thu November 19, 2026`). Validation rejects an abbreviated month.
 - Include the stamp line `*Data pulled ... ET*`, using the data block's own as_of_et.
 - Write the two files and nothing else. Do not summarise your work back to me.
 """
@@ -68,6 +79,7 @@ def run(date: str, data_md: Path, out: Path, log_path: Path) -> tuple[bool, str]
         out_path=out,
         claims_path=config.STATE / f"claims-{date}.json",
         max_chars=brief_cfg.get("max_chars", 5200),
+        target_chars=brief_cfg.get("target_chars", 4800),
     )
     prompt_file = config.STATE / f"prompt-{date}.txt"
     prompt_file.write_text(prompt, encoding="utf-8")
@@ -111,10 +123,28 @@ def run(date: str, data_md: Path, out: Path, log_path: Path) -> tuple[bool, str]
             log.write("\n--- stderr ---\n" + proc.stderr)
         log.write(f"\n=== compose exit {proc.returncode} ===\n")
 
+    claims_path = config.STATE / f"claims-{date}.json"
     if not out.exists():
         return False, f"no brief written (hermes exit {proc.returncode})"
-    if proc.returncode != 0:
-        return False, f"compose failed (hermes exit {proc.returncode})"
     if out.stat().st_mtime < started - 5:
         return False, "brief file was not rewritten by this run"
-    return True, f"hermes exit {proc.returncode}, {out.stat().st_size} bytes"
+
+    size = out.stat().st_size
+    if proc.returncode == 0:
+        return True, f"hermes exit {proc.returncode}, {size} bytes"
+
+    # Hermes reports a spent --max-turns budget as a plain exit 1, with nothing in
+    # stdout naming the cause, so the cause cannot be read from the child. Judge the
+    # work instead: both files rewritten by this run means the writer finished before
+    # the run ended. Publishing is still gated by validate.py (structure, stamp,
+    # length), so a brief this run actually wrote goes on to be judged there.
+    if size < MIN_PLAUSIBLE_BYTES:
+        return False, f"compose failed (hermes exit {proc.returncode}); brief is only {size} bytes"
+    if not claims_path.exists() or claims_path.stat().st_mtime < started - 5:
+        return False, f"compose failed (hermes exit {proc.returncode}); no claims ledger written by this run"
+
+    detail = (f"recovered from hermes exit {proc.returncode} with finished files: "
+              f"{size} bytes, ledger written; validation decides")
+    with log_path.open("a", encoding="utf-8", errors="replace") as log:
+        log.write(detail + "\n")
+    return True, detail
