@@ -175,7 +175,7 @@ def run(date: str, data_md: Path, out: Path, log_path: Path) -> tuple[bool, str]
             if retrieved.isoformat() != row["retrieved"]:
                 raise ValueError("claims ledger schema: retrieved must be YYYY-MM-DD")
         day = dt.date.fromisoformat(date)
-        display = f"{day:%a %B %d, %Y}"
+        display = validate.display_date(day)
         errors, _ = validate.check(
             brief, date, display, int(brief_cfg.get("max_chars", 5200)), None
         )

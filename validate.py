@@ -8,6 +8,7 @@ number is true; that is what the gather block and the playbook rules are for.
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 
 # Emoji-prefixed section headers, in the order the playbook fixes them.
@@ -22,13 +23,20 @@ FOOTER_RE = re.compile(
 )
 
 
+def display_date(day: dt.date) -> str:
+    """The playbook title uses a day number, not a zero-padded day."""
+    return f"{day:%a %B} {day.day}, {day:%Y}"
+
+
 def check(brief: str, expected_date: str, display_date: str, max_chars: int,
           data_warning: str | None) -> tuple[list[str], list[str]]:
     """Return (errors, warnings). Any error means do not publish."""
     errors: list[str] = []
     warnings: list[str] = []
 
-    text = brief.strip()
+    # The ceiling is on the reader-visible brief, not transport metadata.
+    # Strip the completion marker before measuring or checking any content.
+    text = COMPLETION_RE.sub("", brief.strip()).strip()
     if not text:
         return ["brief is empty"], warnings
 
@@ -37,7 +45,8 @@ def check(brief: str, expected_date: str, display_date: str, max_chars: int,
     if len(text) < 800:
         errors.append(f"length {len(text)} is implausibly short")
 
-    title_line = text.splitlines()[0]
+    # Tolerate a writer padding the day; the playbook form remains canonical.
+    title_line = re.sub(r"(?<= )0([1-9])(?=, )", r"\1", text.splitlines()[0])
     if not TITLE_RE.match(text):
         errors.append("missing or malformed title line")
     elif display_date not in title_line and expected_date not in title_line:
@@ -56,12 +65,11 @@ def check(brief: str, expected_date: str, display_date: str, max_chars: int,
     if len(positions) == len(SECTION_MARKERS) and positions != sorted(positions):
         errors.append("sections are out of the canonical order")
 
-    # Footer and transport completion marker are metadata, never section bodies.
-    content = COMPLETION_RE.sub("", text)
-    footer = FOOTER_RE.search(content)
+    # The footer is metadata, never a section body.
+    footer = FOOTER_RE.search(text)
     if footer is None:
         errors.append("missing footer/disclaimer")
-    body_text = content[:footer.start()] if footer else content
+    body_text = text[:footer.start()] if footer else text
     headings = list(re.finditer(r"^##\s+[^\n]*(?:\n|$)", body_text, re.MULTILINE))
     for i, heading in enumerate(headings):
         marker = next((m for m in SECTION_MARKERS if heading.group().startswith(m)), None)

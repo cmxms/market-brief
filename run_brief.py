@@ -27,6 +27,7 @@ import sys
 from zoneinfo import ZoneInfo
 
 import config
+import validate
 
 CHI = ZoneInfo("America/Chicago")
 WINDOW = (7 * 60 + 30, 8 * 60 + 30)  # 07:30-08:30 Chicago
@@ -92,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
 
     date = args.date or dt.datetime.now(CHI).date().isoformat()
     day = dt.date.fromisoformat(date)
-    display = f"{day:%a %B %d, %Y}"
+    display = validate.display_date(day)
 
     log_path = config.LOGS / f"{date}.log"
     with log_path.open("a", encoding="utf-8", errors="replace") as fh:
@@ -174,7 +175,6 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"data as_of_et={payload.get('as_of_et')} gex_warning={bool(warning)}", fh)
 
         # --- validate -----------------------------------------------------
-        import validate
         brief = out.read_text(encoding="utf-8")
         errors, warnings = validate.check(
             brief, date, display, int(settings.get("brief", {}).get("max_chars", 5200)), warning
