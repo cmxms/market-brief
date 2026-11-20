@@ -77,7 +77,7 @@ def mismatch(payload):
 @pytest.mark.parametrize("guard,section", [("crosscheck", "## 📈"), ("gex", "## 🧭"),
                                          ("source", "## 🔁")])
 @pytest.mark.parametrize("route", ["production", "test", "dry"])
-def test_data_error_posts_only_section_quarantined(isolated, monkeypatch, guard, section, route):
+def test_data_error_posts_with_claims_quarantined(isolated, monkeypatch, guard, section, route):
     path, payload, send = isolated
     if guard == "crosscheck":
         mismatch(payload)
@@ -94,11 +94,16 @@ def test_data_error_posts_only_section_quarantined(isolated, monkeypatch, guard,
     assert run(*({"production": [], "test": ["--test"], "dry": ["--dry"]}[route])) == 0
     log = (path / f"{DATE}.log").read_text(encoding="utf-8")
     assert "QUARANTINE " in log
-    record = json.loads(log.split("QUARANTINE ", 1)[1].splitlines()[0])
-    assert record["section"] == section
+    records = [json.loads(line.split("QUARANTINE ", 1)[1]) for line in log.splitlines()
+               if "QUARANTINE " in line]
+    record = next(r for r in records if r["section"] == section)
+    assert record["action"] == "section_replacement"
     start, end = V.section_bodies(BRIEF)[section]
     assert record["removed"] == BRIEF[start:end]
-    expected = BRIEF[:start] + record["replacement"] + BRIEF[end:]
+    expected = BRIEF
+    for edit in reversed(records):
+        assert expected[edit["start"]:edit["end"]] == edit["removed"]
+        expected = expected[:edit["start"]] + edit["replacement"] + expected[edit["end"]:]
     assert (path / f"{DATE}.md").read_text(encoding="utf-8") == BRIEF
     assert V.availability_errors(expected, V.data_issues(payload, R._data_warning(payload))) == {}
     if route == "dry":
@@ -110,7 +115,7 @@ def test_data_error_posts_only_section_quarantined(isolated, monkeypatch, guard,
         assert record["removed"].strip() not in wire
         rows = [json.loads(line) for line in D.LEDGER.read_text(encoding="utf-8").splitlines()]
         quarantine = next(row for row in rows if row["status"] == "quarantined")
-        assert quarantine["sections"] == [record]
+        assert quarantine["sections"] == records
         assert quarantine["brief_id"] == D._identity(expected, D._chunks(expected))
         assert rows[-1]["status"] == "ok"
         send.reset_mock()
@@ -204,12 +209,12 @@ def test_multiple_sections_replaced_without_touching_other_bytes(isolated):
     assert {r["section"] for r in records} == {"## 📈", "## 🔁"}
 
 
-def test_out_of_section_gamma_claim_still_refused(isolated):
+def test_out_of_section_gamma_claim_is_removed(isolated):
     _, payload, send = isolated
     payload["gex"]["SPY"] = {"error": "missing chains"}
     save(isolated, BRIEF.replace("**TL;DR:**", "**TL;DR:** Short gamma."))
-    assert run() == 5
-    send.assert_not_called()
+    assert run() == 0
+    assert send.call_count
 
 
 @pytest.mark.parametrize("section", ["## 📈", "## 🧭"])
@@ -280,5 +285,5 @@ def test_copied_mismatched_metric_cannot_escape_section_repair(isolated):
     _, payload, send = isolated
     mismatch(payload)
     save(isolated, BRIEF.replace("**TL;DR:**", "**TL;DR:** VIX around 31."))
-    assert run() == 5
-    send.assert_not_called()
+    assert run() == 0
+    assert send.call_count

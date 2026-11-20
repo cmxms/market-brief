@@ -265,17 +265,12 @@ def _run(argv: list[str] | None, state: dict) -> int:
             return 5
         issues = validate.data_issues(payload, warning)
         affected = validate.availability_errors(brief, issues)
-        brief, quarantined = validate.quarantine(brief, affected)
-        # Never let quarantine hide a structural failure or a claim outside the
-        # replaceable sections (for example a gamma call in the TL;DR).
+        brief, quarantined = validate.quarantine(brief, affected, issues)
+        # Recheck after repair; protected structure and residual claims still refuse.
         residual = []
         if quarantined:
             residual, _ = validate.check(brief, date, display, max_chars, None,
                                          as_of_et=payload.get("as_of_et"))
-        if warning:
-            outside_error = validate.outside_gamma_error(brief)
-            if outside_error:
-                residual.append(outside_error)
         residual.extend(validate.outside_data_errors(brief, issues))
         if residual:
             for error in residual:

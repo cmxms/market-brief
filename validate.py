@@ -96,38 +96,62 @@ def unavailable_line(issues: list[DataIssue]) -> str:
     return "Unavailable: " + "; ".join(dict.fromkeys(f"{i.metric} — {i.reason}" for i in issues)) + "."
 
 
-def outside_gamma_error(brief: str) -> str | None:
-    """Do not repair one section while leaving unsupported gamma claims elsewhere."""
-    start, end = section_bodies(brief)["## 🧭"]
-    outside = re.sub(r"[*_`]", "", brief[:start] + brief[end:])
-    if re.search(
-        r"\b(?:positive|negative|long|short)[ -]+gamma\b|"
-        r"\bgamma\s*(?::|is|remains|stays)?\s*(?:deeply\s+|strongly\s+)?(?:positive|negative)\b|"
-        r"\b(?:gamma\s+regime|flip\s+level)\b(?!\s+(?:is\s+)?unavailable)",
-        outside, re.IGNORECASE,
-    ):
-        return "GEX unavailable: forbidden gamma claim outside ## 🧭; section-only quarantine cannot remove it"
-    return None
-
-
 def outside_data_errors(brief: str, issues: list[DataIssue]) -> list[str]:
-    """A section-only repair cannot safely remove claims copied elsewhere."""
+    return [f"{i.section} {i.metric} unverified: claim outside its section"
+            for _, _, affected in outside_claims(brief, issues) for i in affected]
+
+
+def outside_claims(brief: str, issues: list[DataIssue]) -> list[tuple[int, int, list[DataIssue]]]:
+    """Locate copied claims by line, including qualitative calls, not just numbers.
+
+    Feed-wide failures use their instrument vocabulary; individual failures use
+    their metric identifier. This is deterministic detection, not fact checking.
+    """
     bodies = section_bodies(brief)
-    errors = []
-    for issue in issues:
-        if issue.reason != "CNBC vs Yahoo disagreement":
+    vocabulary = {
+        "Index recap": r"\b(?:ES|YM|NQ|RTY|S&P|Nasdaq|Dow|Russell)\b",
+        "Macro pulse": r"\b(?:yields?|Treasur\w*|VIX\w*|WTI|crude|oil)\b",
+        "Sector rotation": r"\b(?:XL[A-Z]|SMH|IGV|ARKK|semis|sectors?|staples|utilities|REITs)\b",
+        "Finnhub headlines": r"\b(?:headlines?|Finnhub)\b",
+        "Event calendar": r"\b(?:events?|calendar|CPI|FOMC|PCE|payrolls?)\b",
+        "yields": r"\b(?:yields?|Treasur\w*|[123567]0?Y)\b",
+        "vol": r"\b(?:VIX\w*|volatility)\b",
+    }
+    hits = []
+    offset = 0
+    for line in brief.splitlines(keepends=True):
+        end = offset + len(line)
+        plain = re.sub(r"[*_`]", "", line)
+        affected = []
+        disclosures = [f"{i.metric} — {i.reason}" for i in issues]
+        if line.strip().startswith("Unavailable: ") and all(
+            part in disclosures for part in line.strip()[13:].removesuffix(".").split("; ")
+        ):
+            offset = end
             continue
-        start, end = bodies[issue.section]
-        outside = brief[:start] + brief[end:]
-        alias = re.escape(issue.metric.lstrip("^"))
-        for line in outside.splitlines():
-            if re.search(rf"(?<!\w){alias}(?!\w)", line, re.IGNORECASE):
-                # A copied claim, including an approximation or a regime call,
-                # cannot be legitimised by disclosing the failure in Macro.
-                errors.append(f"{issue.section} {issue.metric} unverified: claim outside its section; "
-                              "section-only quarantine cannot remove it")
-                break
-    return errors
+        for issue in issues:
+            start_body, end_body = bodies.get(issue.section, (0, 0))
+            if start_body <= offset < end_body:
+                continue
+            if line.strip() == unavailable_line([issue]):
+                continue
+            claim_text = plain
+            if line.startswith(issue.section) and issue.metric in vocabulary:
+                # A canonical heading names the feed, but cannot carry a claim.
+                label = "Event gate" if issue.metric == "Event calendar" else issue.metric
+                claim_text = re.sub(re.escape(label), "", plain, count=1, flags=re.IGNORECASE)
+            if issue.section == "## 🧭":
+                pattern = (r"\b(?:gamma|gex|put walls?|call walls?)\b|"
+                           r"\b(?:the|a|nearby)\s+flip\b|\bflip\s+(?:level|is|at)\b")
+            else:
+                pattern = vocabulary.get(issue.metric,
+                                         rf"(?<!\w){re.escape(issue.metric.lstrip('^'))}(?!\w)")
+            if re.search(pattern, claim_text, re.IGNORECASE):
+                affected.append(issue)
+        if affected:
+            hits.append((offset, end, affected))
+        offset = end
+    return hits
 
 
 def availability_errors(brief: str, issues: list[DataIssue]) -> dict[str, list[DataIssue]]:
@@ -158,15 +182,58 @@ def availability_errors(brief: str, issues: list[DataIssue]) -> dict[str, list[D
     return errors
 
 
-def quarantine(brief: str, errors: dict[str, list[DataIssue]]) -> tuple[str, list[dict]]:
+def quarantine(brief: str, errors: dict[str, list[DataIssue]],
+               issues: list[DataIssue] | None = None) -> tuple[str, list[dict]]:
     bodies = section_bodies(brief)
+    edits = []
+    # Plan against the original text so every removal is exactly recoverable.
+    tldr = re.search(r"(?m)^\*\*TL;DR:\*\*[^\n]*(?:\n|$)", brief)
+    tldr_end = min((s for s, _ in bodies.values()), default=len(brief))
+    if tldr:
+        heading = re.search(r"(?m)^##\s", brief[tldr.end():])
+        tldr_end = tldr.end() + heading.start() if heading else tldr_end
+    tldr_start = tldr.start() if tldr else -1
+    line_edits: dict[str, list[tuple[int, int, list[DataIssue]]]] = {}
+    for start, end, affected in outside_claims(brief, issues or []):
+        section = next((s for s, (a, b) in bodies.items() if a <= start < b), None)
+        if section in errors:
+            continue
+        if section is None and tldr and tldr.start() <= start < tldr_end:
+            section = "TL;DR"
+        if section is not None:
+            line_edits.setdefault(section, []).append((start, end, affected))
+        # Title, headings, stamp, footer and metadata are not repairable bodies.
+    errors = dict(errors)
+    for section, lines in line_edits.items():
+        a, b = (tldr_start, tldr_end) if section == "TL;DR" else bodies[section]
+        remaining = brief[a:b]
+        for start, end, _ in reversed(lines):
+            remaining = remaining[:start - a] + remaining[end - a:]
+        content = re.sub(r"<!--.*?-->", "", remaining, flags=re.DOTALL)
+        content = re.sub(r"(?m)^\s*```[^\n]*$", "", content)
+        if section != "TL;DR" and not re.search(r"\w", content):
+            errors[section] = list(dict.fromkeys(i for _, _, group in lines for i in group))
+            continue
+        for start, end, affected in lines:
+            replacement = ""
+            if section == "TL;DR" and tldr_start == start:
+                replacement = "**TL;DR:**\n"
+            edits.append((start, end, section, replacement, affected, "line_removal"))
+        if section == "TL;DR" and not re.search(r"\w", content.replace("**TL;DR:**", "")):
+            start, end, sec, _, affected, action = edits[-len(lines)]
+            label = "**TL;DR:** " if start == tldr_start else ""
+            edits[-len(lines)] = (start, end, sec, label + "Unavailable: see sections.\n",
+                                  affected, action)
     records = []
-    for section in sorted(errors, key=lambda s: bodies[s][0], reverse=True):
+    for section in errors:
         start, end = bodies[section]
         replacement = unavailable_line(errors[section]) + "\n\n"
-        records.append({"section": section, "removed": brief[start:end],
+        edits.append((start, end, section, replacement, errors[section], "section_replacement"))
+    for start, end, section, replacement, affected, action in sorted(edits, reverse=True):
+        records.append({"section": section, "action": action, "start": start, "end": end,
+                        "removed": brief[start:end],
                         "replacement": replacement,
-                        "reasons": [{"metric": i.metric, "reason": i.reason} for i in errors[section]]})
+                        "reasons": [{"metric": i.metric, "reason": i.reason} for i in affected]})
         brief = brief[:start] + replacement + brief[end:]
     return brief, list(reversed(records))
 
@@ -243,6 +310,8 @@ def check(brief: str, expected_date: str, display_date: str, max_chars: int,
 
     if "**TL;DR:**" not in text:
         errors.append("missing TL;DR line")
+    if len(re.findall(r"(?m)^\s*```", text)) % 2:
+        errors.append("unbalanced code fence")
 
     positions = []
     for marker in SECTION_MARKERS:

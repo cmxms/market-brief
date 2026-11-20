@@ -70,7 +70,7 @@ def _chunks(md: str) -> list[str]:
 
 
 def record_quarantine(date: str, md: str, sections: list[dict]) -> None:
-    """Audit the exact removed bodies, bound to the delivered source identity.
+    """Audit exact removed sections/lines and actions, bound to source identity.
 
     This is not a destination acknowledgement and never suppresses a retry.
     """
