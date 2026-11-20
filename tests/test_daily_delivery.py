@@ -187,7 +187,8 @@ def test_banner_rechunks_near_limit_and_retry_keeps_acknowledged_prefix(isolated
     _, send, _ = isolated
     if not initially_stale:
         monkeypatch.setattr(P, "_now_et", lambda: dt.datetime(2026, 11, 19, 9, 21, tzinfo=ET))
-    md = f"*Data pulled {STAMP}*\n" + "x" * 1800 + "\n## Next\n" + "y" * 1600 + "\n-# Run: " + "a" * 32
+    md = (f"*Data pulled {STAMP}*\n" + "x" * 1800 + "\n## Next\n" + "y" * 1600
+          + "\n---\n*Not financial advice — situational awareness only.*\n-# Run: " + "a" * 32)
     attempts = []
     fail = True
 
@@ -271,7 +272,8 @@ def test_real_run_failure_paths_alert(isolated, monkeypatch, code):
 @pytest.mark.parametrize("complete", [False, True])
 def test_pre_d1_chunk_progress_survives_new_banner_budget(isolated, complete):
     _, send, _ = isolated
-    md = f"*Data pulled {STAMP}*\n" + "prefix " * 220 + "\n## Tail\n" + "suffix " * 220 + "\n-# Run: " + "a" * 32
+    md = (f"*Data pulled {STAMP}*\n" + "prefix " * 220 + "\n## Tail\n" + "suffix " * 220
+          + "\n---\n*Not financial advice — situational awareness only.*\n-# Run: " + "a" * 32)
     original = P.chunk(md)
     old_id = D._identity(md, original)
     D.LEDGER.write_text("\n".join(json.dumps({

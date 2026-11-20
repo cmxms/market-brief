@@ -27,6 +27,8 @@ from pathlib import Path
 
 import requests
 
+from reader_text import visible_text
+
 for _s in (sys.stdout, sys.stderr):
     if hasattr(_s, "reconfigure"):
         _s.reconfigure(encoding="utf-8", errors="replace")
@@ -51,14 +53,6 @@ def _load_dotenv() -> None:
 
 
 _load_dotenv()
-
-
-def _strip_comments(md: str) -> str:
-    """Drop `<!-- ... -->` blocks. Discord does NOT hide HTML comments — it prints them
-    literally — so the brief's `<!-- CARD -->` block (the TL;DR image's input, see
-    tldr_card.py) would otherwise be published as visible junk."""
-    import re
-    return re.sub(r"\n?<!--.*?-->\n?", "\n", md, flags=re.DOTALL)
 
 
 def _split_long(section: str, limit: int = LIMIT) -> list[str]:
@@ -96,7 +90,7 @@ def _split_long(section: str, limit: int = LIMIT) -> list[str]:
 def chunk(brief_md: str, *, limit: int = LIMIT) -> list[str]:
     """Split the brief into <=LIMIT-char messages on `## ` section boundaries.
     The title + TL;DR ride in the first chunk; each section packs in greedily."""
-    brief_md = _strip_comments(brief_md)
+    brief_md = visible_text(brief_md)
     lines = brief_md.strip("\n").split("\n")
     sections: list[str] = []
     cur: list[str] = []

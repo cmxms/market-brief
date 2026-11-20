@@ -130,7 +130,6 @@ def test_disclosed_missing_feed_delivered_without_claim(isolated):
 def test_direct_delivery_unknown_or_stale_refused(isolated, defect, test_channel):
     payload, save, post, child = isolated
     brief = BRIEF
-    payload.pop("run_id")  # This test isolates the stamp gate's legacy compatibility.
     path = config.DATA / f"{DATE}.json"
     if defect == "calendar":
         payload["event_gate"] = {"error": "synthetic calendar failure"}
@@ -143,6 +142,7 @@ def test_direct_delivery_unknown_or_stale_refused(isolated, defect, test_channel
         payload["as_of_et"] = value
         brief = BRIEF.replace(STAMP, value)
     save(brief)
+    brief += "\n-# Run: " + payload["run_id"]
     if defect == "missing-block":
         path.unlink()
     elif defect == "bad-json":

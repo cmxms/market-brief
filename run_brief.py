@@ -29,11 +29,12 @@ import argparse
 import datetime as dt
 import json
 import sys
+import uuid
 from zoneinfo import ZoneInfo
 
 import config
-import validate
 import run_identity
+import validate
 
 CHI = ZoneInfo("America/Chicago")
 ET = ZoneInfo("America/New_York")
@@ -95,7 +96,8 @@ def _record_spend(date: str, usd: float) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    state = {"stage": "setup", "reason": "run failed", "log_path": None, "partial": False}
+    state = {"stage": "setup", "reason": "run failed", "log_path": None, "partial": False,
+             "execution_id": uuid.uuid4().hex}
     try:
         code = _run(argv, state)
     except SystemExit as exc:
@@ -123,9 +125,9 @@ def main(argv: list[str] | None = None) -> int:
         try:
             if state["log_path"] is not None:
                 with state["log_path"].open("a", encoding="utf-8") as fh:
-                    _write_log(detail, fh)
+                    _write_log(f"{detail} execution_id={state['execution_id']}", fh)
             else:
-                print(detail, flush=True)
+                print(f"{detail} execution_id={state['execution_id']}", flush=True)
         except OSError:
             print(detail, file=sys.stderr, flush=True)
     return code
@@ -134,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
 def _run(argv: list[str] | None, state: dict) -> int:
     def _log(msg: str, fh) -> None:
         state["reason"] = msg
-        _write_log(msg, fh)
+        _write_log(f"execution_id={state['execution_id']} {msg}", fh)
 
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--date", help="YYYY-MM-DD (default: today, ET); other dates require existing artifacts")

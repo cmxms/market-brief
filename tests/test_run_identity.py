@@ -1,6 +1,7 @@
 """Run provenance regressions: isolated files, fake writer, no network or posts."""
 import datetime as dt
 import json
+import re
 import sys
 from pathlib import Path
 from unittest.mock import Mock
@@ -157,6 +158,9 @@ def test_legacy_skip_then_recompose_and_deliver_only_keep_identity(composer, mon
     assert I.errors(result, ID) == I.errors(md.read_text(encoding="utf-8"), ID) == []
     log = (config.LOGS / f"{DATE}.log").read_text(encoding="utf-8")
     assert all(f"run_id={ID}" in line for line in log.splitlines() if "run start " in line or "compose ok:" in line)
+    executions = [re.findall(r"execution_id=([0-9a-f]{32})", line)[0]
+                  for line in log.splitlines() if "run start " in line]
+    assert len(set(executions)) == 3  # Two skip-gather attempts, then deliver-only.
 
 
 def test_deliver_only_does_not_relabel_legacy_brief(composer, monkeypatch):

@@ -167,17 +167,22 @@ Chicago, inside the 07:30–08:30 window.
 
 ### Run provenance
 
-At run start, `run_brief.py` creates a UUID4 `run_id` (32 lowercase hexadecimal
-characters) before gathering. The same ID is stored in `data/<date>.json`, printed
-in `<date>.data.md`, logged on `run start` and `compose ok`, and appended after the
+The **block ID**, stored as `run_id`, is a UUID4 (32 lowercase hexadecimal
+characters) created before gathering. It identifies the data, not an execution.
+The same ID is stored in `data/<date>.json`, printed in `<date>.data.md`,
+logged on `run start` and `compose ok`, and appended after the
 brief's disclaimer as one Discord subtext line: `-# Run: <run_id>`.
 The parent adds this line deterministically; the writer's budget reserves its
 space. It remains reader-visible, counts against `brief.max_chars` (still 5,200),
 and survives validation, quarantine and Discord message splitting.
 
 Compose reads a retained snapshot of its input in its attempt directory.
-Validation requires the brief ID to match the JSON block; delivery rechecks an
-identified block immediately before sending, so a different same-minute block
+Validation and delivery use the same reader-facing text transformation as
+Discord chunking: well-formed HTML comments are removed; unmatched, nested or
+unsupported comment constructs are rejected. Exactly one visible Run line must
+end the disclaimer footer and match the JSON block. The entire visible footer
+counts against the character ceiling. Delivery unconditionally rechecks the
+identity immediately before sending, so a missing trace or different same-minute block
 cannot silently pass on the freshness stamp alone. Superseded blocks live at
 `data/runs/<date>-<run_id>.json` and `.data.md`. Existing HHMM-keyed legacy
 archives remain readable and untouched; collision suffixes still preserve every
@@ -190,6 +195,13 @@ JSON/Markdown pair is retained under the legacy HHMM key before an ID is added
 and the Markdown is regenerated from the same data. This does not establish
 provenance for any old brief. `--deliver-only` refuses an untraced legacy brief
 (exit 5); recompose it instead. Missing or mismatched identities fail closed.
+
+The **execution ID**, `execution_id`, is a separate UUID4 generated fresh for
+every invocation, including `--skip-gather` and `--deliver-only`. It accompanies
+the runner's run-start, stage, validation, delivery and failure-alert log entries,
+so retries using the same block remain distinguishable. Compose subprocess output
+retains its separate attempt-directory identity. The execution ID never goes on
+the brief and never relabels an existing block or brief.
 
 ### Storage
 

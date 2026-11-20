@@ -21,6 +21,10 @@ version numbers; entries are dated.
 
 ### Fixed
 
+- **Run-identity audit findings (2026-11-20):** validation and Discord now share
+  strict comment removal and check the visible footer trace; delivery rejects
+  untraced legacy briefs unconditionally; fresh execution IDs distinguish retries
+  while preserving the authoritative data-block ID and existing brief labels.
 - **A single long paragraph could break a post part-way.** Discord caps a message at 2,000
   characters and the splitter only broke between lines, so one oversized paragraph failed after the
   earlier chunks had already been sent. Oversized lines are now split at whitespace (hard-split only
