@@ -51,8 +51,51 @@ def _chunks(md: str) -> list[str]:
     return post_discord.chunk(md)
 
 
+def _freshness_failure(md: str, date: str) -> str | None:
+    """Fail closed, then reuse the standalone release/open crossing policy.
+
+    There is no elapsed-minutes threshold: a block becomes stale when it crosses
+    a release/open boundary. Prior-day and future stamps cannot establish current
+    freshness, even though the standalone CLI deliberately stays quiet for them.
+    """
+    import post_discord
+    import validate
+
+    try:
+        payload = json.loads((config.DATA / f"{date}.json").read_text(encoding="utf-8"))
+        errors = validate.stamp_errors(md, payload.get("as_of_et"))
+        if errors:
+            return "could not determine freshness: " + "; ".join(errors)
+        stamp = post_discord._parse_stamp(md)
+        if stamp is None:
+            return "could not determine freshness: unreadable stamp"
+        now = post_discord._now_et()
+        if stamp.date() < now.date():
+            return "stale block: stamp is from a prior ET day"
+        if stamp > now:
+            return "could not determine freshness: stamp is in the future"
+        gate = payload.get("event_gate")
+        if not isinstance(gate, dict) or gate.get("error"):
+            return "could not determine freshness: event calendar unavailable"
+        for key in ("today_events", "today_tier2"):
+            events = gate.get(key)
+            if not isinstance(events, list):
+                return "could not determine freshness: event calendar incomplete"
+            for event in events:
+                datetime.strptime(event["time_et"], "%H:%M")
+        if post_discord.stale_check(md):
+            return "stale block: release or market-open boundary crossed; gather and rewrite"
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        return f"could not determine freshness: {type(exc).__name__}"
+    return None
+
+
 def deliver_production(md: str, date: str, force: bool = False) -> tuple[bool, str]:
     import post_discord
+
+    failure = _freshness_failure(md, date)
+    if failure:
+        return False, failure
 
     try:
         webhooks = post_discord._resolve(None)
@@ -85,6 +128,9 @@ def deliver_production(md: str, date: str, force: bool = False) -> tuple[bool, s
 
 
 def deliver_test(md: str, date: str, channel_id: str, force: bool = False) -> tuple[bool, str]:
+    failure = _freshness_failure(md, date)
+    if failure:
+        return False, failure
     if already_delivered(date, "test") and not force:
         return True, "already delivered to test channel (ledger)"
     parts = _chunks(md)

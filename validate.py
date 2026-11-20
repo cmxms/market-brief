@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+from zoneinfo import ZoneInfo
 
 # Emoji-prefixed section headers, in the order the playbook fixes them.
 SECTION_MARKERS = ("## 📰", "## 📊", "## 🔁", "## 📈", "## 🚨", "## 🧭")
@@ -23,13 +24,47 @@ FOOTER_RE = re.compile(
 )
 
 
+_NO_BLOCK = object()
+
+
+def parse_stamp(value: str) -> dt.datetime:
+    """Parse the gatherer's minute-resolution ET value; no time tolerance."""
+    parsed = dt.datetime.strptime(value, "%a %b %d, %Y %I:%M %p ET")
+    return parsed.replace(tzinfo=ZoneInfo("America/New_York"))
+
+
+def stamp_errors(text: str, as_of_et: object = _NO_BLOCK) -> list[str]:
+    stamps = list(STAMP_RE.finditer(text))
+    if not stamps:
+        return ["missing '*Data pulled ... ET*' stamp"]
+    if len(stamps) != 1:
+        return ["expected exactly one Data pulled stamp"]
+    value = stamps[0].group(1).strip() + " ET"
+    try:
+        stamp = parse_stamp(value)
+    except ValueError:
+        return ["unparsable Data pulled stamp"]
+    # Compose's structural gate has no payload. The orchestrator always supplies
+    # this argument, including None when a block/stamp is missing.
+    if as_of_et is not _NO_BLOCK:
+        if not isinstance(as_of_et, str):
+            return ["gathered block as_of_et is missing or unparsable"]
+        try:
+            block_stamp = parse_stamp(as_of_et)
+        except ValueError:
+            return ["gathered block as_of_et is missing or unparsable"]
+        if stamp != block_stamp or stamps[0].group() != f"*Data pulled {as_of_et}*":
+            return ["Data pulled stamp does not exactly match gathered block as_of_et"]
+    return []
+
+
 def display_date(day: dt.date) -> str:
     """The playbook title uses a day number, not a zero-padded day."""
     return f"{day:%a %B} {day.day}, {day:%Y}"
 
 
 def check(brief: str, expected_date: str, display_date: str, max_chars: int,
-          data_warning: str | None) -> tuple[list[str], list[str]]:
+          data_warning: str | None, as_of_et: object = _NO_BLOCK) -> tuple[list[str], list[str]]:
     """Return (errors, warnings). Any error means do not publish."""
     errors: list[str] = []
     warnings: list[str] = []
@@ -81,8 +116,7 @@ def check(brief: str, expected_date: str, display_date: str, max_chars: int,
         if not re.search(r"\w", body):
             errors.append(f"empty section body {marker}")
 
-    if not STAMP_RE.search(text):
-        errors.append("missing '*Data pulled ... ET*' stamp")
+    errors.extend(stamp_errors(text, as_of_et))
 
     if URL_RE.search(text):
         errors.append("contains a URL; the standing rule forbids source links")
@@ -90,11 +124,33 @@ def check(brief: str, expected_date: str, display_date: str, max_chars: int,
         errors.append("contains a Sources section")
 
     if data_warning:
-        lowered = text.lower()
-        disclosure = ("gamma" in lowered and ("unavailable" in lowered or "incomplete" in lowered))
+        gex = ""
+        for i, heading in enumerate(headings):
+            if heading.group().startswith("## 🧭"):
+                end = headings[i + 1].start() if i + 1 < len(headings) else len(body_text)
+                gex = body_text[heading.end():end]
+        # Same sentence/line in GEX, not an unrelated unavailable feed.
+        disclosure = re.search(
+            r"\b(?:gamma(?:\s+read)?|gex)(?:\s+(?:near-term|full-chain|view|read|is|are|both|and))*"
+            r"\s*[:—-]?\s*unavailable\b", re.sub(r"[*_`]", "", gex), re.IGNORECASE
+        )
         if not disclosure:
-            warnings.append(
+            errors.append(
                 "gather reported a GEX data warning but the brief does not say the gamma read is unavailable"
             )
+        # TL;DR and Regime read can also carry unsupported claims.
+        plain = re.sub(r"[*_`]", "", text.lower())
+        for sentence in re.split(r"[.!?\n]", plain):
+            claim = re.search(
+                r"\b(?:positive|negative|long|short)[ -]+gamma\b|"
+                r"\bgamma\s*(?::|is|remains|stays)?\s*(?:deeply\s+|strongly\s+)?(?:positive|negative)\b|"
+                r"\b(?:gamma\s+regime|(?:gamma\s+)?flip(?:\s+level)?)\b", sentence
+            )
+            if claim and not re.fullmatch(
+                r"\s*(?:[-•]\s*)?(?:gamma\s+regime|(?:gamma\s+)?flip(?:\s+level)?)"
+                r"\s+(?:is\s+)?unavailable\s*", sentence
+            ):
+                errors.append("GEX unavailable: forbidden gamma regime/flip claim")
+                break
 
     return errors, warnings

@@ -1,5 +1,6 @@
 """Reader-visible length, playbook dates, and transport metadata regressions."""
 import datetime as dt
+import json
 import sys
 from pathlib import Path
 from unittest.mock import Mock
@@ -95,6 +96,11 @@ def test_playbook_title_date_at_both_gates(composer, monkeypatch, day, weekday, 
         monkeypatch.setattr(config, "DATA", config.STATE)
         monkeypatch.setattr(config, "LOGS", config.STATE)
         (config.BRIEFS / f"{date}.md").write_text(brief + "\n" + MARKER, encoding="utf-8")
+        (config.DATA / f"{date}.json").write_text(json.dumps({
+            "as_of_et": "Sat Nov 14, 2026 8:00 AM ET",
+            "gex": {s: {v: {"regime": "positive"} for v in ("near_term", "full_chain")}
+                    for s in ("SPY", "QQQ")},
+        }), encoding="utf-8")
         # Exercise validation and real chunking, never a delivery transport.
         code = R.main(["--date", date, "--deliver-only", "--dry", "--ignore-window", "--force-weekend"])
         assert code == 0

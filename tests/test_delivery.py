@@ -31,6 +31,9 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(D.subprocess, "run", forbidden)
     monkeypatch.setattr(P.time, "sleep", forbidden)
     monkeypatch.setattr(D, "LEDGER", tmp_path / "delivery.jsonl")
+    # These tests isolate transport/ledger behaviour. Real freshness gates are
+    # exercised without this stub in test_brief_truth.py.
+    monkeypatch.setattr(D, "_freshness_failure", lambda *_: None)
     monkeypatch.setenv("DISCORD_WEBHOOK_URL", WEBHOOK_A)
     monkeypatch.setenv("DISCORD_WEBHOOK_URLS", WEBHOOK_B)
 
