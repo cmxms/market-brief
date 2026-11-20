@@ -1,5 +1,6 @@
 """Offline composer environment tests; no Hermes process or network calls."""
 import os
+import re
 import sys
 from pathlib import Path
 from unittest.mock import Mock
@@ -111,7 +112,7 @@ def test_config_key_tracking_survives_reload_and_missing_file(composer):
 def test_nonzero_exit_keeps_failure_path_and_logs_filtering(composer):
     run, process, _, log = composer
     process.return_value.returncode = 7
-    assert run() == (False, "no brief written (hermes exit 7)")
+    assert run()[0] is False
     assert "compose environment: filtered" in log.read_text(encoding="utf-8")
     process.assert_called_once()
 
@@ -132,22 +133,20 @@ def test_launch_failure_is_explicit_without_inherited_env_retry(composer):
 
 def test_success_keeps_command_and_output_contract(composer):
     run, process, out, log = composer
-
-    def write_brief(*args, **kwargs):
-        out.write_text("test brief", encoding="utf-8")
-        return Mock(returncode=0, stdout="", stderr="")
-
-    process.side_effect = write_brief
-    assert run() == (True, "hermes exit 0, 10 bytes")
+    process.side_effect = _capped(out, exit_code=0)
+    ok, detail = run()
+    assert ok is True
+    assert detail.startswith("hermes exit 0;")
+    prompt_file = Path(process.call_args.args[0][3])
     assert process.call_args.args[0] == [
-        "fake-hermes", "chat", "--query-file", str(config.STATE / f"prompt-{DATE}.txt"),
+        "fake-hermes", "chat", "--query-file", str(prompt_file),
         "--oneshot", "-Q", "--in", str(config.PROJECT), "-t", "web,file",
         "-m", "deepseek/deepseek-v4.1-flash-1017", "--max-turns", "40", "--run-budget", "900",
     ]
     assert process.call_args.kwargs["timeout"] == 1020
-    prompt = (config.STATE / f"prompt-{DATE}.txt").read_text(encoding="utf-8")
-    assert str(out) in prompt
-    assert str(config.STATE / f"claims-{DATE}.json") in prompt
+    prompt = prompt_file.read_text(encoding="utf-8")
+    assert str(prompt_file.parent / "brief.md") in prompt
+    assert str(prompt_file.parent / "claims.json") in prompt
     assert "compose environment: filtered" in log.read_text(encoding="utf-8")
     assert process.call_args.kwargs["check"] is False
     assert "Never silently omit a failed section" in prompt
@@ -155,27 +154,42 @@ def test_success_keeps_command_and_output_contract(composer):
 
 def test_nonzero_exit_rejects_a_stub_brief(composer):
     run, process, out, _ = composer
-
-    def failed_child(*args, **kwargs):
-        out.write_text("test brief", encoding="utf-8")
-        return Mock(returncode=7, stdout="", stderr="failed")
-
-    process.side_effect = failed_child
-    assert run() == (False, "compose failed (hermes exit 7); brief is only 10 bytes")
+    process.side_effect = _capped(out, brief="test brief", exit_code=7)
+    assert run()[0] is False
     assert process.call_args.kwargs["check"] is False
 
 
 TURN_CAP = ("You've reached the maximum number of tool-calling iterations allowed. "
             "Please provide a final response summarizing what you've found.")
-BODY = "x" * 2000
+HEADERS = (
+    "## 📰 Last 24h — what happened & why", "## 📊 Breadth / divergence",
+    "## 🔁 Sector rotation (rel to SPY)", "## 📈 Macro pulse (moves, not levels)",
+    "## 🚨 Event gate", "## 🧭 Regime read (generalized)",
+)
+PARAGRAPH = "Synthetic test prose, not market data. " * 8
+FOOTER = "---\n*Not financial advice — situational awareness only.*"
+BODY = ("# 📊 Market Brief — Sat November 14, 2026\n"
+        "*Data pulled Sat Nov 14, 2026 8:00 AM ET*\n**TL;DR:** Synthetic fixture.\n\n" +
+        "\n\n".join(h + "\n" + PARAGRAPH for h in HEADERS) + "\n\n" + FOOTER)
+
+
+def outputs(cmd):
+    """Read destinations, including the pre-fix prompt for regression replay."""
+    prompt = Path(cmd[cmd.index("--query-file") + 1]).read_text(encoding="utf-8")
+    brief = Path(prompt.split("Write the finished brief to:\n")[1].splitlines()[0])
+    ledger = Path(prompt.split("Then write a claims ledger to:\n")[1].splitlines()[0])
+    match = re.search(r"<!-- market-brief complete: [^>]+ -->", prompt)
+    marker = match.group() if match else "<!-- market-brief complete: attempt-baseline -->"
+    return brief, ledger, marker
 
 
 def _capped(out, *, brief=BODY, ledger=True, exit_code=1):
     def child(*args, **kwargs):
+        candidate, claims, marker = outputs(args[0])
         if brief is not None:
-            out.write_text(brief, encoding="utf-8")
+            candidate.write_text(brief + "\n" + marker, encoding="utf-8")
         if ledger:
-            (config.STATE / f"claims-{DATE}.json").write_text("[]", encoding="utf-8")
+            claims.write_text("[]", encoding="utf-8")
         return Mock(returncode=exit_code, stdout=f"...\n{TURN_CAP}\nBoth files are written.", stderr="")
 
     return child
@@ -186,15 +200,15 @@ def test_nonzero_exit_with_both_files_written_goes_to_validation(composer):
     process.side_effect = _capped(out)
     ok, detail = run()
     assert ok is True
-    assert "recovered from hermes exit 1 with finished files" in detail
-    assert f"{len(BODY)} bytes" in detail
+    assert "recovered after a failed child (complete attempt)" in detail
+    assert "validated and promoted" in detail
     assert detail in log.read_text(encoding="utf-8")
 
 
 def test_nonzero_exit_without_a_ledger_still_fails(composer):
     run, process, out, _ = composer
     process.side_effect = _capped(out, ledger=False)
-    assert run() == (False, "compose failed (hermes exit 1); no claims ledger written by this run")
+    assert run()[0] is False
 
 
 def test_nonzero_exit_with_a_stale_ledger_still_fails(composer):
@@ -204,13 +218,13 @@ def test_nonzero_exit_with_a_stale_ledger_still_fails(composer):
     stale = ledger.stat().st_mtime - 3600
     os.utime(ledger, (stale, stale))
     process.side_effect = _capped(out, ledger=False)
-    assert run() == (False, "compose failed (hermes exit 1); no claims ledger written by this run")
+    assert run()[0] is False
 
 
 def test_nonzero_exit_with_a_stub_brief_still_fails(composer):
     run, process, out, _ = composer
     process.side_effect = _capped(out, brief="partial")
-    assert run() == (False, "compose failed (hermes exit 1); brief is only 7 bytes")
+    assert run()[0] is False
 
 
 def test_nonzero_exit_with_an_unrewritten_brief_still_fails(composer):
@@ -220,13 +234,13 @@ def test_nonzero_exit_with_an_unrewritten_brief_still_fails(composer):
     os.utime(out, (stale, stale))
     (config.STATE / f"claims-{DATE}.json").write_text("[]", encoding="utf-8")
     process.return_value = Mock(returncode=1, stdout=TURN_CAP, stderr="")
-    assert run() == (False, "brief file was not rewritten by this run")
+    assert run()[0] is False
 
 
 def test_prompt_asks_for_one_pass_at_the_target_length(composer):
-    run, _, _, _ = composer
+    run, process, _, _ = composer
     run()
-    prompt = (config.STATE / f"prompt-{DATE}.txt").read_text(encoding="utf-8")
+    prompt = Path(process.call_args.args[0][3]).read_text(encoding="utf-8")
     assert "Aim for about 4800 characters and stay under 5200" in prompt
     assert "ONE `write_file` call" in prompt
     assert "shave it with `patch`" in prompt

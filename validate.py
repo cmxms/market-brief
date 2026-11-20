@@ -16,6 +16,10 @@ SECTION_MARKERS = ("## 📰", "## 📊", "## 🔁", "## 📈", "## 🚨", "## �
 STAMP_RE = re.compile(r"\*Data pulled\s+(.+?)\s*ET\*")
 TITLE_RE = re.compile(r"^# 📊 Market Brief — ")
 URL_RE = re.compile(r"https?://", re.IGNORECASE)
+COMPLETION_RE = re.compile(r"\n<!-- market-brief complete: attempt-[A-Za-z0-9_-]+ -->\s*\Z")
+FOOTER_RE = re.compile(
+    r"(?m)^---\s*\n\s*\*Not financial advice — situational awareness only\.\*\s*\Z"
+)
 
 
 def check(brief: str, expected_date: str, display_date: str, max_chars: int,
@@ -51,6 +55,23 @@ def check(brief: str, expected_date: str, display_date: str, max_chars: int,
             positions.append(idx)
     if len(positions) == len(SECTION_MARKERS) and positions != sorted(positions):
         errors.append("sections are out of the canonical order")
+
+    # Footer and transport completion marker are metadata, never section bodies.
+    content = COMPLETION_RE.sub("", text)
+    footer = FOOTER_RE.search(content)
+    if footer is None:
+        errors.append("missing footer/disclaimer")
+    body_text = content[:footer.start()] if footer else content
+    headings = list(re.finditer(r"^##\s+[^\n]*(?:\n|$)", body_text, re.MULTILINE))
+    for i, heading in enumerate(headings):
+        marker = next((m for m in SECTION_MARKERS if heading.group().startswith(m)), None)
+        if marker is None:
+            continue
+        end = headings[i + 1].start() if i + 1 < len(headings) else len(body_text)
+        body = body_text[heading.end():end]
+        body = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
+        if not re.search(r"\w", body):
+            errors.append(f"empty section body {marker}")
 
     if not STAMP_RE.search(text):
         errors.append("missing '*Data pulled ... ET*' stamp")

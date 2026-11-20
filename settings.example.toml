@@ -12,6 +12,17 @@ max_turns = 40
 run_budget_seconds = 900
 
 [brief]
+# Compose writes only to a fresh <runtime>/state/compose-attempts/attempt-*/
+# directory (prompt.txt, brief.md, claims.json). The prompt supplies a unique
+# end marker, placed after the disclaimer as the last thing in brief.md.
+# claims.json must be an array of objects with nonempty string fields claim,
+# source (HTTP(S) URL), retrieved (YYYY-MM-DD); [] is valid when none are needed.
+# The parent checks the marker, ledger schema and brief validation, then writes
+# complete.json (attempt, date, child_exit and artifact paths/SHA-256 hashes).
+# Only then are those checked bytes promoted to briefs/<date>.md and
+# <runtime>/state/claims-<date>.json. Mtimes are never completion evidence.
+# A nonzero child exit is recoverable only for such a complete attempt; failed
+# attempts remain for diagnosis. Timeout/launch failures never promote.
 # Hard limit on the finished brief; validation rejects anything longer.
 max_chars = 5200
 # What the writer is told to aim for, so it lands under the ceiling in one pass
