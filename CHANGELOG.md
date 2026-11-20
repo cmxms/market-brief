@@ -8,6 +8,19 @@ version numbers; entries are dated.
 
 ### Fixed
 
+- **A single long paragraph could break a post part-way.** Discord caps a message at 2,000
+  characters and the splitter only broke between lines, so one oversized paragraph failed after the
+  earlier chunks had already been sent. Oversized lines are now split at whitespace (hard-split only
+  when a single word is longer than the limit), a carried fenced block is closed and reopened with
+  its language tag, and every chunk is checked before anything is sent — an unfit chunk fails the
+  destination without posting a prefix. Chunk boundaries are unchanged for all 121 archived briefs.
+- **A retry after a partial send duplicated what had already arrived.** Delivery recorded a
+  destination as done only when every chunk landed, so a failure on chunk two resent chunk one.
+  Acknowledgements are now recorded per chunk, bound to the destination and a fingerprint of the
+  exact brief, and a retry resumes from the first outstanding chunk. Rows written before this change
+  keep their meaning and are never reinterpreted as chunk acknowledgements. A timeout with no
+  acknowledgement is treated as unacknowledged — a remote accept whose response was lost can still
+  duplicate rather than omit, which is the deliberate direction.
 - **A failed run can no longer publish an unfinished brief.** The first attempt at this fix
   (recovering a brief when the writer ran out of turns) checked only that the brief and ledger were
   recent, so an audit reproduced an unfinished draft plus a malformed ledger reaching delivery with
