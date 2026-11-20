@@ -222,10 +222,14 @@ def test_unrelated_unavailable_inside_regime_not_disclosure():
     assert any("does not say" in e for e in check(brief, "failure")[0])
 
 
-def test_undisclosed_symbol_failure_stops_orchestrator(isolated):
+def test_undisclosed_symbol_failure_quarantines_claims_before_posting(isolated):
     payload, save, post, child = isolated
     payload["gex"]["SPY"] = {"error": "synthetic symbol failure"}
     save(historical())
-    assert run() == 5
-    post.assert_not_called()
+    assert run() == 0
+    assert post.call_count
+    wire = post.call_args.args[0]
+    assert "gamma is deeply negative" not in wire
+    assert "Unavailable: see sections." in wire
+    assert "synthetic symbol failure" in wire
     child.assert_not_called()
