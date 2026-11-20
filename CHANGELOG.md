@@ -21,6 +21,9 @@ version numbers; entries are dated.
 
 ### Fixed
 
+- **Comment-like diagnostics could suppress failure alerts.** Alerts now use
+  bounded literal splitting rather than brief parsing, so an HTTP error body
+  that looks like a comment cannot prevent the notification.
 - **Run-identity audit findings (2026-11-20):** validation and Discord now share
   strict comment removal and check the visible footer trace; delivery rejects
   untraced legacy briefs unconditionally; fresh execution IDs distinguish retries

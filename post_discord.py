@@ -403,7 +403,9 @@ def alert_failure(stage: str, reason: str, code: int, *, partial: bool = False) 
     outcome = ("Delivery may be partial; check the delivery ledger." if partial else
                "Nothing was posted.")
     message = f"Market brief failed — {stage}: {reason} Exit code {code}. {outcome}"
-    parts = chunk(message)
+    # Diagnostics are arbitrary text, not brief Markdown: never interpret HTML
+    # comments or code fences. Slice literally after redaction and truncation.
+    parts = [message[i:i + LIMIT] for i in range(0, len(message), LIMIT)]
     _validate_chunks(parts)
     failed = []
     for webhook in _resolve(None):
