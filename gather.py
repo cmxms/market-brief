@@ -1468,6 +1468,14 @@ def _bn(x) -> str:
 
 def render_md(d: dict) -> str:
     """A compact, human-readable dump of the data block (what Claude reads)."""
+    import validate
+
+    issues = validate.data_issues(d)
+    bad_metrics = {i.metric for i in issues if i.reason == "CNBC vs Yahoo disagreement"}
+
+    def blocked(metric, reason):
+        return f"- {metric}: UNVERIFIED / UNAVAILABLE — DO NOT PUBLISH — {reason}"
+
     L = [f"# BRIEF DATA BLOCK — {d['date']}",
          (f"Data pulled: **{d.get('as_of_et', d['as_of'])}**  "
           f"(put this freshness stamp in the brief so readers know it's live)"), ""]
@@ -1475,13 +1483,10 @@ def render_md(d: dict) -> str:
     eg = d["event_gate"]
     L.append("## Event gate")
     if eg.get("error"):
-        # A blind gate must never be read as a quiet calendar — that is the 2026-07-30
-        # mistake in its worst form. The rest of the block is still good; this section
-        # is simply absent and has to be replaced by the step-2 web sweep.
+        # A blind gate must never be read as a quiet calendar.
         L.append(f"- 🔴 EVENT CALENDAR UNAVAILABLE — {eg['error']}")
         L.append("  **The gate is BLIND today. Do NOT write 'no events today' or infer a "
-                 "quiet calendar from this.** Cover the whole calendar from the step-2 web "
-                 "sweep instead, and fix t1_calendar.yaml after the brief goes out.")
+                 "quiet calendar from this.** State the calendar is unavailable with its reason.")
     else:
         if eg.get("malformed"):
             L.append(f"- ⚠️ {len(eg['malformed'])} calendar entr"
@@ -1539,7 +1544,7 @@ def render_md(d: dict) -> str:
     L.append("\n## Macro pulse (moves, not levels)")
     mp = d["macro_pulse"]
     y = mp.get("yields", {})
-    if y.get("tenors"):
+    if y.get("tenors") and not y.get("error"):
         mode = y.get("mode", "EOD")
         stale_tag = ("  ⚠️ STALE (data is behind — flag in the brief, do NOT present "
                      "as live)" if y.get("stale") else "")
@@ -1550,7 +1555,10 @@ def render_md(d: dict) -> str:
         for ten in YIELD_TENORS:
             v = y["tenors"].get(ten)
             if v:
-                L.append(f"    {ten:>3}: {v.get('last')}%  chg {v.get('chg')}")
+                if ten in bad_metrics:
+                    L.append(blocked(ten, "CNBC vs Yahoo disagreement"))
+                else:
+                    L.append(f"    {ten:>3}: {v.get('last')}%  chg {v.get('chg')}")
         eod = mp.get("yields_eod_close") or {}
         if mode == "LIVE" and eod.get("tenors"):
             e10 = eod["tenors"].get("10Y", {})
@@ -1562,7 +1570,9 @@ def render_md(d: dict) -> str:
         L.append(f"  Source attempt failed: {source} ({reason})")
     for t in ["^VIX", "^VIX9D"]:
         v = mp.get(t, {})
-        if "error" not in v:
+        if t in bad_metrics:
+            L.append(blocked(t, "CNBC vs Yahoo disagreement"))
+        elif "error" not in v:
             L.append(f"- {v.get('label')} ({t}): {v.get('last')}  chg {v.get('chg')}  "
                      f"[{v.get('last_date')}] ({v.get('source', '?')}; "
                      f"{v.get('mode', 'relayed quote')})"
@@ -1572,7 +1582,7 @@ def render_md(d: dict) -> str:
     off = mp.get("vol_official")
     if off and off.get("error"):
         L.append(f"- VOL CURVE: UNAVAILABLE — {off['error']}")
-    if off and off.get("levels"):
+    if off and off.get("levels") and not off.get("error"):
         lv = off.get("levels", {})
         curve = "  ".join(f"{s} {lv[s]['last']}" for s in CBOE_INDICES if s in lv)
         L.append(f"- VOL CURVE (Cboe OFFICIAL close [{off.get('as_of')}], "
@@ -1591,6 +1601,15 @@ def render_md(d: dict) -> str:
             L.append(f"    {source} ({reason})")
 
     ts = mp.get("term_structure")
+    bad_vol = bad_metrics & {"^VIX", "^VIX9D"}
+    failed_vol = [t for t in ("^VIX", "^VIX9D") if (mp.get(t) or {}).get("error")]
+    if bad_vol or failed_vol:
+        reason = "CNBC vs Yahoo disagreement" if bad_vol else "volatility source unavailable"
+        L.append(blocked("TERM STRUCTURE", reason))
+        ts = None  # Do not leak the rejected quote through a derived spread/live note.
+    elif off and off.get("error") and ts and str(ts.get("source", "")).startswith("Cboe"):
+        L.append(blocked("Official term structure", off["error"]))
+        ts = None
     if ts and not ts.get("mixed_dates"):
         src = ts.get("source", "")
         L.append(f"- TERM STRUCTURE [both legs {ts.get('as_of')}, same-moment"
@@ -1632,7 +1651,7 @@ def render_md(d: dict) -> str:
             else:
                 bad = [f"{k}: CNBC {r['primary']} vs Yahoo {r['fallback']} (Δ{r['diff']*scale:.1f}{unit})"
                        for k, r in c["rows"].items() if not r["match"]]
-                L.append(f"- {lbl}: ⚠️ MISMATCH — VERIFY BEFORE PUBLISHING: " + "; ".join(bad))
+                L.append(blocked(lbl, "CNBC vs Yahoo disagreement; rejected samples: " + "; ".join(bad)))
 
     sr = d.get("sector_rotation", {})
     if "error" in sr or not sr.get("ranked"):
@@ -1665,16 +1684,16 @@ def render_md(d: dict) -> str:
              f"full-chain = every listed expiration (structural flip)")
     for sym in GEX_SYMBOLS:
         v = d["gex"].get(sym, {})
-        if "error" in v:
-            L.append(f"- {sym}: ERROR {v['error']}"); continue
+        if v.get("error") or v.get("data_warning"):
+            L.append(blocked(sym, v.get("error") or v["data_warning"])); continue
         nt, fc = v.get("near_term") or {}, v.get("full_chain") or {}
         views = [("near-term", nt), ("full-chain", fc)]
         unavailable = [(label, view) for label, view in views
-                       if not view or view.get("error") or view.get("status") == "degraded"]
+                       if not view or view.get("error") or view.get("data_warning") or view.get("status") == "degraded"]
         if len(unavailable) == 2:
             L.append(f"- {sym}: 🔴 GAMMA READ UNAVAILABLE")
         for label, view in unavailable:
-            reason = view.get("degraded_reason") or view.get("error") or "no computed view"
+            reason = view.get("degraded_reason") or view.get("error") or view.get("data_warning") or "no computed view"
             remaining = next((name for name, other in views if (name, other) not in unavailable), None)
             shown = f"; {remaining} view shown" if remaining else ""
             L.append(f"    {sym}: GEX {label} view unavailable — {reason}{shown}")
@@ -1695,14 +1714,6 @@ def render_md(d: dict) -> str:
                      f"put wall {view['put_wall']}{walls}")
             if view.get("flip_note"):
                 L.append(f"    GEX {label} flip unavailable — {view['flip_note']}")
-        # Silent when the chain is healthy. "Healthy" means no OPEN INTEREST went missing —
-        # a nonzero `dropped_pct` alone is normal (newly-listed strikes carry no greeks and
-        # no OI, and contribute exactly zero GEX). This only appears when the feed is truly
-        # degraded, and it is a note to the WRITER, not brief copy: see playbook.md's
-        # "never publish process notes".
-        for label, view in views:
-            if view.get("data_warning") and (label, view) not in unavailable:
-                L.append(f"    🔴 CHAIN INCOMPLETE — GEX {label}: {view['data_warning']}")
         available = next(view for label, view in views if (label, view) not in unavailable)
         cov = (fc if ("full-chain", fc) not in unavailable else available).get("coverage") or {}
         L.append(f"    coverage: {cov.get('contracts', 'n/a')} contracts, "
@@ -1715,6 +1726,7 @@ def render_md(d: dict) -> str:
     fh = d["finnhub"]
     if fh.get("error"):
         L.append(f"- Finnhub headlines: UNAVAILABLE — {fh['error']}")
+        fh = {}  # A partial failed response is not a source of publishable claims.
     L.append(f"- status: {fh.get('status')}")
     L.append("- GENERAL (trusted-first):")
     for x in fh.get("general", []):
@@ -1723,7 +1735,13 @@ def render_md(d: dict) -> str:
     L.append("- THEMED:")
     for x in fh.get("themed", []):
         L.append(f"  • [{x['source']}] {x['headline']}")
-    return "\n".join(L)
+    for issue in issues:
+        L.append(blocked(f"{issue.section} / {issue.metric}", issue.reason))
+    # Retain existing diagnostic wording while making every unavailable emission
+    # explicit, including errors for individual futures and GEX views.
+    return "\n".join(line + " [UNVERIFIED / UNAVAILABLE — DO NOT PUBLISH]"
+                     if ("UNAVAILABLE" in line.upper() or ": ERROR " in line)
+                     and "DO NOT PUBLISH" not in line else line for line in L)
 
 
 def _archive_previous_run(date: str) -> str | None:

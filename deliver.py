@@ -69,6 +69,18 @@ def _chunks(md: str) -> list[str]:
     return parts
 
 
+def record_quarantine(date: str, md: str, sections: list[dict]) -> None:
+    """Audit the exact removed bodies, bound to the delivered source identity.
+
+    This is not a destination acknowledgement and never suppresses a retry.
+    """
+    LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    with LEDGER.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"date": date, "target": "validation", "status": "quarantined",
+                             "at": _now(), "brief_id": _identity(md, _chunks(md)),
+                             "sections": sections}, ensure_ascii=False) + "\n")
+
+
 def _identity(md: str, parts: list[str]) -> str:
     # Bind progress to both the exact source and its ordered chunk boundaries.
     return hashlib.sha256(json.dumps([md, parts], ensure_ascii=False).encode("utf-8")).hexdigest()

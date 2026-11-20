@@ -62,6 +62,8 @@ def _data_warning(payload: dict) -> str | None:
         for view in ("near_term", "full_chain"):
             block = views.get(view)
             reason = (block.get("error") or block.get("data_warning")) if isinstance(block, dict) else None
+            if isinstance(block, dict) and block.get("status") == "degraded":
+                reason = reason or block.get("degraded_reason") or "degraded chain"
             if not isinstance(block, dict) or not block:
                 reason = "missing chain"
             if reason:
@@ -250,8 +252,9 @@ def _run(argv: list[str] | None, state: dict) -> int:
         # --- validate -----------------------------------------------------
         state["stage"] = "validate"
         brief = out.read_text(encoding="utf-8")
+        max_chars = int(settings.get("brief", {}).get("max_chars", 5200))
         errors, warnings = validate.check(
-            brief, date, display, int(settings.get("brief", {}).get("max_chars", 5200)), warning,
+            brief, date, display, max_chars, None,
             as_of_et=payload.get("as_of_et"),
         )
         for w in warnings:
@@ -260,6 +263,26 @@ def _run(argv: list[str] | None, state: dict) -> int:
             for e in errors:
                 _log(f"FAIL {e}", fh)
             return 5
+        issues = validate.data_issues(payload, warning)
+        affected = validate.availability_errors(brief, issues)
+        brief, quarantined = validate.quarantine(brief, affected)
+        # Never let quarantine hide a structural failure or a claim outside the
+        # replaceable sections (for example a gamma call in the TL;DR).
+        residual = []
+        if quarantined:
+            residual, _ = validate.check(brief, date, display, max_chars, None,
+                                         as_of_et=payload.get("as_of_et"))
+        if warning:
+            outside_error = validate.outside_gamma_error(brief)
+            if outside_error:
+                residual.append(outside_error)
+        residual.extend(validate.outside_data_errors(brief, issues))
+        if residual:
+            for error in residual:
+                _log(f"FAIL {error}", fh)
+            return 5
+        for record in quarantined:
+            _log("QUARANTINE " + json.dumps(record, ensure_ascii=False), fh)
         _log(f"validation passed ({len(validate.visible_text(brief))} chars)", fh)
 
         claims_path = config.STATE / f"claims-{date}.json"
@@ -284,6 +307,8 @@ def _run(argv: list[str] | None, state: dict) -> int:
             return 0
 
         import deliver
+        if quarantined:
+            deliver.record_quarantine(date, brief, quarantined)
         if args.test:
             channel = str(settings.get("discord", {}).get("test_channel_id", ""))
             if not channel:
