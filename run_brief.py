@@ -10,6 +10,7 @@ Exit codes are meaningful so Task Scheduler and a human both see the real outcom
     6  outside the 07:30-08:30 Chicago window
     7  delivery failed
     8  monthly spend estimate reached
+    9  requested date unsupported for live gathering (today ET only)
 
 NYSE holidays are detected from `market_holidays.yaml` (2026-2027 closures and
 early closes): a listed holiday exits 2 without posting, an early close is logged.
@@ -30,6 +31,7 @@ import config
 import validate
 
 CHI = ZoneInfo("America/Chicago")
+ET = ZoneInfo("America/New_York")
 WINDOW = (7 * 60 + 30, 8 * 60 + 30)  # 07:30-08:30 Chicago
 
 
@@ -87,14 +89,14 @@ def _record_spend(date: str, usd: float) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--date", help="YYYY-MM-DD (default: today, Chicago)")
+    ap.add_argument("--date", help="YYYY-MM-DD (default: today, ET); other dates require existing artifacts")
     ap.add_argument("--dry", action="store_true", help="run and check, print the split, post nothing")
     ap.add_argument("--test", action="store_true", help="deliver to the configured test channel")
     ap.add_argument("--force-weekend", action="store_true", help="run even on a Saturday or Sunday")
     ap.add_argument("--force-holiday", action="store_true", help="run even on a listed NYSE holiday")
     ap.add_argument("--ignore-window", action="store_true", help="run outside 07:30-08:30 Chicago")
     ap.add_argument("--force", action="store_true", help="ignore the delivery ledger")
-    ap.add_argument("--skip-gather", action="store_true", help="reuse today's data block")
+    ap.add_argument("--skip-gather", action="store_true", help="reuse the requested date's existing data block")
     ap.add_argument("--deliver-only", action="store_true",
                     help="validate and deliver an existing brief without gathering or composing")
     args = ap.parse_args(argv)
@@ -103,13 +105,22 @@ def main(argv: list[str] | None = None) -> int:
     config.load_env()
     settings = config.load_settings()
 
-    date = args.date or dt.datetime.now(CHI).date().isoformat()
+    date = args.date or dt.datetime.now(ET).date().isoformat()
     day = dt.date.fromisoformat(date)
     display = validate.display_date(day)
 
     log_path = config.LOGS / f"{date}.log"
     with log_path.open("a", encoding="utf-8", errors="replace") as fh:
         _log(f"run start date={date} dry={args.dry} test={args.test}", fh)
+
+        # Historical reconstruction is not implemented: never mix today's feeds
+        # with another session's paths. Missing --skip-gather data still gathers.
+        reusing = args.deliver_only or (args.skip_gather and (config.DATA / f"{date}.json").exists())
+        today_et = dt.datetime.now(ET).date()
+        if not reusing and day != today_et:
+            _log(f"refusing date={date}: live gathering only supports today's ET date ({today_et}); "
+                 "use --skip-gather with an existing data block or --deliver-only with an existing brief", fh)
+            return 9
 
         now = dt.datetime.now(CHI)
         minutes = now.hour * 60 + now.minute
@@ -165,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
                     import gather
                     gather.DATA_DIR = config.DATA
                     gather.BRIEFS_DIR = config.BRIEFS
-                    gather.main()
+                    gather.main(day)
                 except Exception as exc:  # noqa: BLE001 - reported with its type
                     _log(f"gather failed: {exc!r}", fh)
                     return 3
@@ -198,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
             for e in errors:
                 _log(f"FAIL {e}", fh)
             return 5
-        _log(f"validation passed ({len(brief)} chars)", fh)
+        _log(f"validation passed ({len(validate.visible_text(brief))} chars)", fh)
 
         claims_path = config.STATE / f"claims-{date}.json"
         if claims_path.exists():

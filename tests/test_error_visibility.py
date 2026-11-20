@@ -188,6 +188,8 @@ def test_unreadable_archive_preserves_original(monkeypatch, tmp_path):
 
 
 def test_gather_failure_stops_before_compose_or_delivery(monkeypatch, tmp_path):
+    # Exercise a permitted live date; historical dates are now refused earlier.
+    date = dt.datetime.now(R.ET).date().isoformat()
     monkeypatch.setattr(config, "ensure_dirs", lambda: None)
     monkeypatch.setattr(config, "load_env", lambda: None)
     monkeypatch.setattr(config, "load_settings", dict)
@@ -202,8 +204,8 @@ def test_gather_failure_stops_before_compose_or_delivery(monkeypatch, tmp_path):
     sender = Mock(side_effect=AssertionError("must not post"))
     monkeypatch.setattr(compose, "run", composer)
     monkeypatch.setattr(deliver, "deliver_production", sender)
-    assert R.main(["--date", str(TODAY), "--ignore-window"]) == 3
-    assert "gather failed" in (tmp_path / f"{TODAY}.log").read_text(encoding="utf-8")
+    assert R.main(["--date", date, "--ignore-window", "--force-weekend", "--force-holiday"]) == 3
+    assert "gather failed" in (tmp_path / f"{date}.log").read_text(encoding="utf-8")
     composer.assert_not_called()
     sender.assert_not_called()
 

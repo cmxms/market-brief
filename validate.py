@@ -63,6 +63,16 @@ def display_date(day: dt.date) -> str:
     return f"{day:%a %B} {day.day}, {day:%Y}"
 
 
+def visible_text(brief: str) -> str:
+    """Ceiling applies to stripped, reader-visible Unicode text with LF newlines.
+
+    Normalize CRLF and lone CR just like a universal-newline file read, then
+    remove transport metadata. Both compose and runner use this measurement.
+    """
+    normalized = brief.replace("\r\n", "\n").replace("\r", "\n")
+    return COMPLETION_RE.sub("", normalized.strip()).strip()
+
+
 def check(brief: str, expected_date: str, display_date: str, max_chars: int,
           data_warning: str | None, as_of_et: object = _NO_BLOCK) -> tuple[list[str], list[str]]:
     """Return (errors, warnings). Any error means do not publish."""
@@ -71,7 +81,7 @@ def check(brief: str, expected_date: str, display_date: str, max_chars: int,
 
     # The ceiling is on the reader-visible brief, not transport metadata.
     # Strip the completion marker before measuring or checking any content.
-    text = COMPLETION_RE.sub("", brief.strip()).strip()
+    text = visible_text(brief)
     if not text:
         return ["brief is empty"], warnings
 

@@ -1738,15 +1738,16 @@ def _archive_previous_run(date: str) -> str | None:
 
     Deliberately archive rather than rename the live file: data/{date}.json stays
     "the latest run", so playbook.md and anything else reading that path are untouched.
-    The archive is keyed by the SAME HH:MM the brief's stamp shows, so
-    any past brief resolves to exactly one file with no extra bookkeeping.
+    The archive starts with the SAME HH:MM the brief's stamp shows. Collisions
+    get sequence suffixes; minute-resolution stamps can identify several blocks,
+    so retain every candidate and its full as_of rather than silently losing one.
 
     That key is **ET**, from the block's own tz-aware `as_of` — the same clock as the
     stamp. It read a naive LOCAL `as_of` until 2026-08-04, which silently offset every
     archived name from the stamp by the machine's UTC offset (the 9:31 AM ET run landed
-    as `-0831`), quietly breaking the one-file guarantee this docstring promises.
+    as `-0831`), quietly breaking the stamp-to-block relationship.
 
-    Returns the archived run's HHMM, or None if there was nothing to archive.
+    Returns HHMM (optionally suffixed with -NNN), or None if nothing to archive.
     """
     j = DATA_DIR / f"{date}.json"
     if not j.exists():
@@ -1758,26 +1759,43 @@ def _archive_previous_run(date: str) -> str | None:
         raise RuntimeError(f"Previous data block cannot be archived safely: {type(exc).__name__}") from None
     runs = DATA_DIR / "runs"
     runs.mkdir(parents=True, exist_ok=True)
-    j.replace(runs / f"{date}-{stamp}.json")
     md = DATA_DIR / f"{date}.data.md"
+    suffix = stamp
+    sequence = 0
+    while ((runs / f"{date}-{suffix}.json").exists()
+           or (runs / f"{date}-{suffix}.data.md").exists()):
+        sequence += 1
+        suffix = f"{stamp}-{sequence:03d}"
+    # Exclusive creation is the final guard, including races after the checks.
+    # Copy both artifacts before removing either live file: any failure stops
+    # the gather rather than replacing an archive or discarding the originals.
+    with (runs / f"{date}-{suffix}.json").open("xb") as target:
+        target.write(j.read_bytes())
     if md.exists():
-        md.replace(runs / f"{date}-{stamp}.data.md")
-    return stamp
+        with (runs / f"{date}-{suffix}.data.md").open("xb") as target:
+            target.write(md.read_bytes())
+        md.unlink()
+    j.unlink()
+    return suffix
 
 
-def main() -> None:
+def main(today: dt.date | None = None) -> None:
+    # Live feeds cannot reconstruct a historical (or future) session.
+    current = pd.Timestamp.now(tz="America/New_York").date()
+    if today is not None and today != current:
+        raise ValueError(f"live gathering only supports today's ET date ({current}); requested {today}")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     BRIEFS_DIR.mkdir(parents=True, exist_ok=True)
-    d = gather()
+    d = gather(current)
     archived = _archive_previous_run(d["date"])   # only after gather() succeeds
     (DATA_DIR / f"{d['date']}.json").write_text(json.dumps(d, indent=2, default=str), encoding="utf-8")
     md = render_md(d)
     (DATA_DIR / f"{d['date']}.data.md").write_text(md, encoding="utf-8")
     print(md)
     if archived:
-        print(f"\n[gather] NOTE: an earlier run from {archived[:2]}:{archived[2:]} ET already "
+        print(f"\n[gather] NOTE: an earlier run from {archived[:2]}:{archived[2:4]} ET already "
               f"existed for {d['date']} — archived to data/runs/{d['date']}-{archived}.*  "
-              f"A brief stamped with that time was written from THAT block, not this one.")
+              "Minute-resolution brief stamps may match multiple runs; retain all candidates.")
     print(f"\n[gather] wrote data/{d['date']}.json + data/{d['date']}.data.md ; "
           f"the finished brief goes to briefs/{d['date']}.md")
 
