@@ -47,7 +47,7 @@ def already_delivered(date: str, target: str) -> bool:
 
 def _record(date: str, target: str, status: str, detail: str, chunks: int = 0,
             *, brief_id: str | None = None, chunk_index: int | None = None,
-            banner: str = "") -> None:
+            banner: str = "", body_parts: list[str] | None = None) -> None:
     from post_discord import sanitize
 
     LEDGER.parent.mkdir(parents=True, exist_ok=True)
@@ -58,15 +58,13 @@ def _record(date: str, target: str, status: str, detail: str, chunks: int = 0,
             **({"brief_id": brief_id} if brief_id is not None else {}),
             **({"chunk_index": chunk_index} if chunk_index is not None else {}),
             "stale": bool(banner), "stale_reason": sanitize(banner),
+            **({"body_parts": body_parts} if body_parts is not None else {}),
         }) + "\n")
 
 
-def _chunks(md: str, *, reserve: bool = False) -> list[str]:
+def _chunks(md: str) -> list[str]:
     import post_discord
-    # Fixed body boundaries, independent of the clock: a retry can prepend its
-    # current warning to the first outstanding chunk without replaying any ack.
-    parts = (post_discord.chunk(md, limit=post_discord.LIMIT - BANNER_ROOM)
-             if reserve or post_discord._parse_stamp(md) is not None else post_discord.chunk(md))
+    parts = post_discord.chunk(md)
     post_discord._validate_chunks(parts)
     return parts
 
@@ -161,24 +159,48 @@ def _plan(md: str, date: str, target: str, force: bool) -> tuple[str, list[str],
     import post_discord
 
     parts = _chunks(md)
-    # Preserve progress written before banner room was reserved. Re-chunk only
-    # the unacknowledged old suffix, never replay its acknowledged prefix.
-    original = post_discord.chunk(md)
-    old_id = _identity(md, original)
     rows = [r for r in _rows() if r.get("date") == date and r.get("target") == target]
-    full_id = _identity(md, parts)
-    modern_full = any(r.get("brief_id") == full_id and "stale" in r for r in rows)
-    old_rows = [r for r in rows if r.get("brief_id") == old_id and "stale" not in r]
-    if old_rows and not modern_full and not force and original != parts:
-        start = _progress(date, target, old_id, len(original))
-        if start == len(original):
-            return md, original, old_id, ""
-        if start:
-            parts = _chunks("\n\n".join(original[start:]), reserve=True)
     brief_id = _identity(md, parts)
+    if not force:
+        # Retain acknowledged boundaries from the previous banner-reserving version.
+        if rows and not any(r.get("brief_id") == brief_id for r in rows):
+            reserved = post_discord.chunk(md, limit=post_discord.LIMIT - BANNER_ROOM)
+            reserved_id = _identity(md, reserved)
+            if any(r.get("brief_id") == reserved_id for r in rows):
+                parts, brief_id = reserved, reserved_id
+        for row in rows:
+            if row.get("brief_id") == brief_id and "body_parts" in row:
+                parts = row["body_parts"]
+        post_discord._validate_chunks(parts)
     banner = _banner(md, date)
     wire = banner + "\n\n" + md if banner else md
     return wire, parts, brief_id, banner
+
+
+def _split_attached(body: str, room: int) -> list[str]:
+    """Split once, using the full message limit for the unbannered remainder."""
+    import post_discord
+
+    cuts = range(min(len(body) - 1, room), 0, -1)
+    for whitespace_only in (True, False):
+        for cut in cuts:
+            if whitespace_only and not body[cut - 1].isspace():
+                continue
+            prefix, suffix = body[:cut], body[cut:]
+            # Never cut a fence delimiter or its language label in half.
+            line = body[body.rfind("\n", 0, cut) + 1:body.find("\n", cut)
+                        if "\n" in body[cut:] else len(body)]
+            if line.lstrip().startswith("```") and body[cut - 1] != "\n":
+                continue
+            fence = ""
+            for ln in prefix.splitlines():
+                if ln.lstrip().startswith("```"):
+                    fence = "" if fence else ln.strip()
+            first = prefix + ("\n```" if fence else "")
+            second = (fence + "\n" if fence else "") + suffix
+            if len(first) <= room and len(second) <= post_discord.LIMIT:
+                return [first, second]
+    return []
 
 
 def _with_banner(parts: list[str], banner: str, start: int) -> list[str]:
@@ -187,9 +209,40 @@ def _with_banner(parts: list[str], banner: str, start: int) -> list[str]:
     wire_parts = parts.copy()
     if banner and start < len(parts):
         # Keep the full reason in the ledger; bound only the visible envelope.
-        visible = banner if len(banner) <= BANNER_ROOM - 2 else banner[:BANNER_ROOM - 5] + "..."
-        wire_parts[start] = visible + "\n\n" + parts[start]
+        visible = " ".join(banner.split())
+        if len(visible) > BANNER_ROOM - 2:
+            visible = visible[:BANNER_ROOM - 5] + "..."
+        body = parts[start]
+        if len(visible) + 2 + len(body) > post_discord.LIMIT:
+            # Only the attached body may split. Shorten the envelope if fence
+            # overhead would require more than one additional message.
+            while True:
+                split = _split_attached(body, post_discord.LIMIT - len(visible) - 2)
+                if split:
+                    break
+                if len(visible) <= 3:
+                    raise RuntimeError("Discord banner cannot fit with message content")
+                visible = visible[:-4] + "..."
+            wire_parts[start:start + 1] = split
+        wire_parts[start] = visible + "\n\n" + wire_parts[start]
     post_discord._validate_chunks(wire_parts)
+    return wire_parts
+
+
+def _prepare(parts: list[str], banner: str, start: int, date: str, target: str,
+             brief_id: str, force: bool) -> list[str]:
+    wire_parts = _with_banner(parts, banner, start)
+    body_parts = wire_parts.copy()
+    if banner:
+        body_parts[start] = body_parts[start].split("\n\n", 1)[1]
+    # Persist a changed layout before its first acknowledgement: a failure between
+    # the two fragments must resume at the second, not replay the first fragment.
+    if force:
+        _record(date, target, "started", "forced delivery", len(body_parts),
+                brief_id=brief_id, banner=banner, body_parts=body_parts)
+    elif body_parts != parts:
+        _record(date, target, "planned", "split banner-attached message", len(body_parts),
+                brief_id=brief_id, banner=banner, body_parts=body_parts)
     return wire_parts
 
 
@@ -220,8 +273,7 @@ def deliver_production(md: str, date: str, force: bool = False) -> tuple[bool, s
         if start == len(parts):
             continue
         try:
-            if force:
-                _record(date, target, "started", "forced delivery", len(parts), brief_id=brief_id, banner=banner)
+            parts = _prepare(parts, banner, start, date, target, brief_id, force)
 
             def acknowledge(index: int, destination: str = target, count: int = len(parts),
                             identity: str = brief_id, warning: str = banner) -> None:
@@ -231,7 +283,7 @@ def deliver_production(md: str, date: str, force: bool = False) -> tuple[bool, s
             if banner:
                 stale_reasons.add(banner)
             summary = post_discord.post(wire, webhook=webhook, start=start, on_ack=acknowledge,
-                                        parts=_with_banner(parts, banner, start))
+                                        parts=parts)
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
             _record(date, target, "failed", repr(exc), len(parts), brief_id=brief_id, banner=banner)
             failed.append(target)
@@ -262,10 +314,11 @@ def deliver_test(md: str, date: str, channel_id: str, force: bool = False) -> tu
     start = 0 if force else _progress(date, target, brief_id, len(parts), ("test",))
     if start == len(parts):
         return True, "already delivered to test channel (ledger)"
-    parts = _with_banner(parts, banner, start)
+    try:
+        parts = _prepare(parts, banner, start, date, target, brief_id, force)
+    except RuntimeError as exc:
+        return False, f"test delivery failed: {exc}"
     config.STATE.mkdir(parents=True, exist_ok=True)
-    if force:
-        _record(date, target, "started", "forced delivery", len(parts), brief_id=brief_id, banner=banner)
     for index in range(start, len(parts)):
         i, part = index + 1, parts[index]
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md",

@@ -5,8 +5,10 @@ import os
 import subprocess
 import sys
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock
+from zoneinfo import ZoneInfo
 
 import pytest
 import requests
@@ -253,6 +255,186 @@ def test_multichunk_progress_is_destination_specific(monkeypatch):
         "97766ca3b102442ca196418339853aeec1883a612bfd0506afdff85d2ee7abda",
     ]),
 ])
-def test_committed_brief_boundaries(name, expected):
-    parts = P.chunk((ROOT / "briefs" / name).read_text(encoding="utf-8"))
+def test_committed_brief_boundaries(name, expected, monkeypatch):
+    md = (ROOT / "briefs" / name).read_text(encoding="utf-8")
+    parts = P.chunk(md)
     assert [hashlib.sha256(p.encode("utf-8")).hexdigest() for p in parts] == expected
+    monkeypatch.setattr(D, "_banner", lambda *_: "")
+    sent = []
+    monkeypatch.setattr(P, "_send", lambda _, content: sent.append(content))
+    assert D.deliver_production(md, DATE)[0]
+    print(name, "no banner:", len(sent), "lengths:", [len(p) for p in sent])
+    assert len(sent) == len(expected)
+    assert sent == parts
+
+
+def release_banner():
+    stamp = datetime(2026, 11, 20, 8, 0, tzinfo=ZoneInfo(P.ET))
+    now = stamp.replace(hour=9, minute=31)
+    events = [("08:30", "test GDP.")]
+    return P.stale_banner(stamp, now, P.crossed_boundaries(stamp, now, events))
+
+
+def capture_route(monkeypatch, route, sent):
+    if route == "production":
+        monkeypatch.setattr(P, "_send", lambda _, content: sent(content))
+        return lambda md, force=False: D.deliver_production(md, DATE, force=force)
+
+    def child(args, **kwargs):
+        try:
+            sent(Path(args[-1]).read_text(encoding="utf-8"))
+        except RuntimeError:
+            return Mock(returncode=1, stderr="mock rejection")
+        return Mock(returncode=0)
+
+    monkeypatch.setattr(D.subprocess, "run", child)
+    return lambda md, force=False: D.deliver_test(md, DATE, "mock-channel", force=force)
+
+
+@pytest.mark.parametrize("route", ["production", "test"])
+@pytest.mark.parametrize("name,count", [("2026-11-20.md", 4), ("2026-11-19.md", 4)])
+def test_committed_banner_splits_only_attached_message(monkeypatch, route, name, count):
+    md = (ROOT / "briefs" / name).read_text(encoding="utf-8")
+    original = P.chunk(md)
+    banner = release_banner()
+    assert len(banner) == 268
+    monkeypatch.setattr(D, "_banner", lambda *_: banner)
+    sent = []
+    deliver = capture_route(monkeypatch, route, sent.append)
+    assert deliver(md)[0]
+    print(name, route, "banner:", len(sent), "lengths:", [len(p) for p in sent])
+    assert len(sent) == count
+    assert sent[0].startswith(banner + "\n\n")
+    if len(banner) + 2 + len(original[0]) > P.LIMIT:
+        assert len(sent) == len(original) + 1
+        assert sent[2:] == original[1:]
+        assert sent[0].removeprefix(banner + "\n\n") + sent[1] == original[0]
+    else:
+        assert sent == [banner + "\n\n" + original[0], *original[1:]]
+    P._validate_chunks(sent)
+    sent.clear()
+    assert deliver(md)[0]
+    assert not sent
+
+
+@pytest.mark.parametrize("route", ["production", "test"])
+@pytest.mark.parametrize("fail_at", [1, 2])
+def test_new_banner_on_retry_never_replays_acknowledged_body(monkeypatch, route, fail_at):
+    md = "\n".join(f"## Section {i}\n" + (str(i) + " ") * 880 for i in range(4))
+    original = P.chunk(md)
+    banner = ""
+    monkeypatch.setattr(D, "_banner", lambda *_: banner)
+    sent = []
+    failing = True
+
+    def send(content):
+        if failing and len(sent) == fail_at:
+            raise RuntimeError("mock rejection")
+        sent.append(content)
+
+    deliver = capture_route(monkeypatch, route, send)
+    assert not deliver(md)[0]
+    assert sent == original[:fail_at]
+    sent.clear()
+    banner = release_banner()
+    failing = False
+    assert deliver(md)[0]
+    assert sent[0].startswith(banner + "\n\n")
+    assert sent[2:] == original[fail_at + 1:]
+    assert not any(p in sent for p in original[:fail_at])
+    P._validate_chunks(sent)
+
+
+@pytest.mark.parametrize("route", ["production", "test"])
+@pytest.mark.parametrize("retry_banner", ["same", "longer", "none"])
+def test_retry_between_banner_fragments_preserves_progress(monkeypatch, route, retry_banner):
+    md = "## First\n" + "body " * 360 + "\n## Next\n" + "tail " * 300
+    banner = release_banner()
+    monkeypatch.setattr(D, "_banner", lambda *_: banner)
+    sent = []
+    failing = True
+
+    def send(content):
+        if failing and sent:
+            raise RuntimeError("mock rejection")
+        sent.append(content)
+
+    deliver = capture_route(monkeypatch, route, send)
+    assert not deliver(md)[0]
+    assert len(sent) == 1
+    acknowledged_body = sent[0].split("\n\n", 1)[1]
+    planned = next(r["body_parts"] for r in ledger() if r["status"] == "planned")
+    assert planned[0] == acknowledged_body
+    if retry_banner == "longer":
+        banner += " Additional release: " + "event " * 300
+    elif retry_banner == "none":
+        banner = ""
+    sent.clear()
+    failing = False
+    assert deliver(md)[0]
+    assert sent[-1] == planned[-1]
+    assert all(acknowledged_body not in p for p in sent)
+    P._validate_chunks(sent)
+    sent.clear()
+    assert deliver(md)[0]
+    assert not sent
+
+
+@pytest.mark.parametrize("route", ["production", "test"])
+def test_oversized_banner_shortened_but_full_reason_recorded(monkeypatch, route):
+    md = "## Body\n" + "word " * 370
+    banner = release_banner() + " calendar " * 400
+    monkeypatch.setattr(D, "_banner", lambda *_: banner)
+    sent = []
+    deliver = capture_route(monkeypatch, route, sent.append)
+    assert deliver(md)[0]
+    assert len(sent) == 2
+    assert sent[0].split("\n\n", 1)[0].endswith("...")
+    assert all(r["stale_reason"] == banner for r in ledger())
+    P._validate_chunks(sent)
+
+
+@pytest.mark.parametrize("route", ["production", "test"])
+def test_previous_reserved_layout_acknowledgements_remain_valid(monkeypatch, route):
+    md = "## First\n" + "first " * 290 + "\n## Next\n" + "next " * 290
+    reserved = P.chunk(md, limit=P.LIMIT - D.BANNER_ROOM)
+    target = "production:" + P.fingerprint(WEBHOOK) if route == "production" else "test:mock-channel"
+    D._record(DATE, target, "chunk_ok", "previous version", len(reserved),
+              brief_id=D._identity(md, reserved), chunk_index=0)
+    monkeypatch.setattr(D, "_banner", lambda *_: "")
+    sent = []
+    deliver = capture_route(monkeypatch, route, sent.append)
+    assert deliver(md)[0]
+    assert sent == reserved[1:]
+
+
+@pytest.mark.parametrize("fence", ["```", "```python", "```" + "language" * 170])
+def test_banner_split_keeps_fences_balanced_and_body_intact(fence):
+    body = fence + "\n" + "word " * ((1800 - len(fence)) // 5) + "\n```"
+    original = [body, "## Unchanged\ntail"]
+    banner = release_banner() + " reason " * 200
+    parts = D._with_banner(original, banner, 0)
+    P._validate_chunks(parts)
+    assert len(parts) == 3
+    assert parts[-1] == original[-1]
+    first_body = parts[0].split("\n\n", 1)[1]
+    assert all(sum(ln.lstrip().startswith("```") for ln in p.splitlines()) % 2 == 0
+               for p in (first_body, parts[1]))
+    assert first_body.removesuffix("\n```") + parts[1].removeprefix(fence + "\n") == body
+
+
+@pytest.mark.parametrize("route", ["production", "test"])
+def test_force_after_split_starts_again_with_canonical_boundaries(monkeypatch, route):
+    md = "## First\n" + "body " * 360 + "\n## Next\n" + "tail " * 300
+    banner = release_banner()
+    monkeypatch.setattr(D, "_banner", lambda *_: banner)
+    sent = []
+    deliver = capture_route(monkeypatch, route, sent.append)
+    assert deliver(md)[0]
+    sent.clear()
+    banner = ""
+    assert deliver(md, force=True)[0]
+    assert sent == P.chunk(md)
+    sent.clear()
+    assert deliver(md)[0]
+    assert not sent
