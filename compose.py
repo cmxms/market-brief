@@ -9,16 +9,17 @@ separate process that runs after validation.
 
 from __future__ import annotations
 
+import datetime as dt
+import hashlib
+import json
 import os
 import subprocess
-import time
+import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import config
-
-# Below this a file is a stub, not a brief. A non-zero exit then stays a failure
-# instead of becoming something validate.py gets to judge.
-MIN_PLAUSIBLE_BYTES = 1500
+import validate
 
 PROMPT = """You are writing today's market brief for {date}.
 
@@ -39,6 +40,7 @@ person, a count, a date, or a figure not present in the data block:
   {{"claim": "what the brief asserts", "source": "https://...", "retrieved": "YYYY-MM-DD"}}
 Include only claims you actually sourced. If a claim has no source, leave it out
 of the brief entirely.
+Each object must have nonempty string fields claim, source (HTTP(S) URL), and retrieved (YYYY-MM-DD); use [] if there are no such claims.
 
 Rules that override everything else:
 - Do not post anywhere and do not attempt to. You have no tool that can.
@@ -56,6 +58,7 @@ Rules that override everything else:
 - The title line is exactly `# 📊 Market Brief — {{weekday}} {{full month}} {{D}}, {{YYYY}}` with the
   month spelled out (e.g. `Thu November 19, 2026`). Validation rejects an abbreviated month.
 - Include the stamp line `*Data pulled ... ET*`, using the data block's own as_of_et.
+- After the disclaimer, append `{end_marker}` as the last thing in the brief file (no text after it).
 - Write the two files and nothing else. Do not summarise your work back to me.
 """
 
@@ -67,22 +70,43 @@ def run(date: str, data_md: Path, out: Path, log_path: Path) -> tuple[bool, str]
     brief_cfg = settings.get("brief", {})
     reference = config.BRIEFS / str(brief_cfg.get("reference", "2026-07-14.md"))
 
+    def result(ok: bool, detail: str) -> tuple[bool, str]:
+        with log_path.open("a", encoding="utf-8", errors="replace") as log:
+            log.write(detail + "\n")
+        return ok, detail
+
     if not data_md.exists():
-        return False, f"data block missing: {data_md}"
+        return result(False, f"failed: data block missing: {data_md}")
     if not reference.exists():
-        return False, f"reference brief missing: {reference}"
+        return result(False, f"failed: reference brief missing: {reference}")
+
+    # mkdtemp exclusively creates a new namespace; neither wall time nor mtimes
+    # establish ownership. Retain failed attempts for diagnosis, never reuse them.
+    try:
+        attempts = config.STATE / "compose-attempts"
+        attempts.mkdir(parents=True, exist_ok=True)
+        attempt = Path(tempfile.mkdtemp(prefix="attempt-", dir=attempts))
+        candidate = attempt / "brief.md"
+        claims_path = attempt / "claims.json"
+        end_marker = f"<!-- market-brief complete: {attempt.name} -->"
+    except OSError as exc:
+        return result(False, f"failed: attempt creation ({type(exc).__name__})")
 
     prompt = PROMPT.format(
         date=date,
         data_md=data_md,
         reference=reference,
-        out_path=out,
-        claims_path=config.STATE / f"claims-{date}.json",
+        out_path=candidate,
+        claims_path=claims_path,
+        end_marker=end_marker,
         max_chars=brief_cfg.get("max_chars", 5200),
         target_chars=brief_cfg.get("target_chars", 4800),
     )
-    prompt_file = config.STATE / f"prompt-{date}.txt"
-    prompt_file.write_text(prompt, encoding="utf-8")
+    prompt_file = attempt / "prompt.txt"
+    try:
+        prompt_file.write_text(prompt, encoding="utf-8")
+    except OSError as exc:
+        return result(False, f"failed: attempt prompt write ({type(exc).__name__})")
 
     cmd = [
         config.hermes_bin(), "chat",
@@ -102,7 +126,6 @@ def run(date: str, data_md: Path, out: Path, log_path: Path) -> tuple[bool, str]
                  if key.upper() not in excluded
                  and not key.upper().startswith("DISCORD_WEBHOOK")}
 
-    started = time.time()
     with log_path.open("a", encoding="utf-8", errors="replace") as log:
         log.write(f"\n=== compose start {date} ===\n")
         log.write("compose environment: filtered (runtime config keys and DISCORD_WEBHOOK* excluded)\n")
@@ -112,10 +135,10 @@ def run(date: str, data_md: Path, out: Path, log_path: Path) -> tuple[bool, str]
                                   errors="replace", timeout=int(model_cfg.get("run_budget_seconds", 900)) + 120,
                                   check=False)
         except subprocess.TimeoutExpired:
-            log.write("compose timed out\n")
-            return False, "compose timed out"
+            log.write("failed: compose timed out\n")
+            return False, "failed: compose timed out"
         except OSError as exc:
-            detail = f"compose launch failed with filtered environment ({type(exc).__name__}, errno {exc.errno})"
+            detail = f"failed: compose launch failed with filtered environment ({type(exc).__name__}, errno {exc.errno})"
             log.write(detail + "\n")
             return False, detail
         log.write(proc.stdout or "")
@@ -123,28 +146,63 @@ def run(date: str, data_md: Path, out: Path, log_path: Path) -> tuple[bool, str]
             log.write("\n--- stderr ---\n" + proc.stderr)
         log.write(f"\n=== compose exit {proc.returncode} ===\n")
 
-    claims_path = config.STATE / f"claims-{date}.json"
-    if not out.exists():
-        return False, f"no brief written (hermes exit {proc.returncode})"
-    if out.stat().st_mtime < started - 5:
-        return False, "brief file was not rewritten by this run"
+    try:
+        # Read once: validate, attest and promote the same bytes, not a later read.
+        # Symlinks could otherwise import artifacts from another attempt.
+        if candidate.is_symlink() or claims_path.is_symlink():
+            raise ValueError("attempt artifacts must not be symlinks")
+        brief_bytes = candidate.read_bytes()
+        claims_bytes = claims_path.read_bytes()
+        brief = brief_bytes.decode("utf-8")
+        if not brief.rstrip().endswith(end_marker):
+            raise ValueError("missing attempt end-of-document marker or text after marker")
+        claims = json.loads(claims_bytes.decode("utf-8"))
+        if not isinstance(claims, list) or any(
+            not isinstance(row, dict) or any(
+                not isinstance(row.get(field), str) or not row[field].strip()
+                for field in ("claim", "source", "retrieved")
+            ) for row in claims
+        ):
+            raise ValueError("claims ledger schema: expected array of objects with nonempty claim/source/retrieved strings")
+        for row in claims:
+            source = urlsplit(row["source"])
+            if source.scheme not in ("http", "https") or not source.hostname:
+                raise ValueError("claims ledger schema: source must be an HTTP(S) URL")
+            try:
+                retrieved = dt.date.fromisoformat(row["retrieved"])
+            except ValueError:
+                raise ValueError("claims ledger schema: retrieved must be YYYY-MM-DD") from None
+            if retrieved.isoformat() != row["retrieved"]:
+                raise ValueError("claims ledger schema: retrieved must be YYYY-MM-DD")
+        day = dt.date.fromisoformat(date)
+        display = f"{day:%a %B %d, %Y}"
+        errors, _ = validate.check(
+            brief, date, display, int(brief_cfg.get("max_chars", 5200)), None
+        )
+        if errors:
+            raise ValueError("brief validation: " + "; ".join(errors))
 
-    size = out.stat().st_size
-    if proc.returncode == 0:
-        return True, f"hermes exit {proc.returncode}, {size} bytes"
+        # The parent's completion record attests to the exact checked artifacts.
+        # It costs no writer turn and is never inferred from file existence.
+        record = {
+            "attempt": attempt.name, "date": date, "child_exit": proc.returncode,
+            "brief": {"path": candidate.name, "sha256": hashlib.sha256(brief_bytes).hexdigest()},
+            "claims": {"path": claims_path.name, "sha256": hashlib.sha256(claims_bytes).hexdigest()},
+        }
+        (attempt / "complete.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+        # Stage beside each destination for same-filesystem atomic replacement.
+        # No canonical artifact is touched until every completeness check passed.
+        canonical_claims = config.STATE / f"claims-{date}.json"
+        staged_claims = canonical_claims.with_suffix(f".{attempt.name}.tmp")
+        staged_brief = out.with_suffix(f".{attempt.name}.tmp")
+        staged_claims.write_bytes(claims_bytes)
+        staged_brief.write_bytes(brief_bytes)
+        staged_claims.replace(canonical_claims)
+        staged_brief.replace(out)
+    except (OSError, UnicodeError, ValueError) as exc:
+        reason = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+        return result(False, f"failed (hermes exit {proc.returncode}, {attempt.name}): {reason}")
 
-    # Hermes reports a spent --max-turns budget as a plain exit 1, with nothing in
-    # stdout naming the cause, so the cause cannot be read from the child. Judge the
-    # work instead: both files rewritten by this run means the writer finished before
-    # the run ended. Publishing is still gated by validate.py (structure, stamp,
-    # length), so a brief this run actually wrote goes on to be judged there.
-    if size < MIN_PLAUSIBLE_BYTES:
-        return False, f"compose failed (hermes exit {proc.returncode}); brief is only {size} bytes"
-    if not claims_path.exists() or claims_path.stat().st_mtime < started - 5:
-        return False, f"compose failed (hermes exit {proc.returncode}); no claims ledger written by this run"
-
-    detail = (f"recovered from hermes exit {proc.returncode} with finished files: "
-              f"{size} bytes, ledger written; validation decides")
-    with log_path.open("a", encoding="utf-8", errors="replace") as log:
-        log.write(detail + "\n")
-    return True, detail
+    outcome = ("hermes exit 0" if proc.returncode == 0 else
+               f"recovered after a failed child (complete attempt); hermes exit {proc.returncode}")
+    return result(True, f"{outcome}; {attempt.name}; validated and promoted {len(brief_bytes)} bytes")
