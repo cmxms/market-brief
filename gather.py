@@ -1480,6 +1480,9 @@ def render_md(d: dict) -> str:
          (f"Data pulled: **{d.get('as_of_et', d['as_of'])}**  "
           f"(put this freshness stamp in the brief so readers know it's live)"), ""]
 
+    if "run_id" in d:
+        import run_identity
+        L.insert(1, run_identity.line(d["run_id"]))
     eg = d["event_gate"]
     L.append("## Event gate")
     if eg.get("error"):
@@ -1745,34 +1748,23 @@ def render_md(d: dict) -> str:
 
 
 def _archive_previous_run(date: str) -> str | None:
-    """Move an existing same-day data block into data/runs/ before it gets overwritten.
+    """Retain the previous JSON/Markdown pair before replacing the latest block.
 
-    A published brief's only link back to the numbers it was written from is its
-    freshness stamp (the gatherer's `as_of_et`). A second run of the day overwrote
-    data/{date}.json in place, so that link broke silently — measured on 3 of 19 July
-    days (7/16 by 4 min, 7/30 by 41 min, 7/27 by 91 min), and the published error
-    tracked the gap: 7/27's NQ change was 1.39pp away from the stored block. `data/`
-    is gitignored, so the original run was simply gone.
+    run_id is authoritative, not the freshness stamp (the gatherer's `as_of_et`)
+    whose minute resolution cannot distinguish two same-minute runs. Legacy
+    blocks without an ID still use their own ET HHMM, with sequence suffixes on
+    collisions. Existing archives are never renamed or overwritten.
 
-    Deliberately archive rather than rename the live file: data/{date}.json stays
-    "the latest run", so playbook.md and anything else reading that path are untouched.
-    The archive starts with the SAME HH:MM the brief's stamp shows. Collisions
-    get sequence suffixes; minute-resolution stamps can identify several blocks,
-    so retain every candidate and its full as_of rather than silently losing one.
-
-    That key is **ET**, from the block's own tz-aware `as_of` — the same clock as the
-    stamp. It read a naive LOCAL `as_of` until 2026-08-04, which silently offset every
-    archived name from the stamp by the machine's UTC offset (the 9:31 AM ET run landed
-    as `-0831`), quietly breaking the stamp-to-block relationship.
-
-    Returns HHMM (optionally suffixed with -NNN), or None if nothing to archive.
+    Returns the retention key, or None if nothing to archive.
     """
     j = DATA_DIR / f"{date}.json"
     if not j.exists():
         return None
     try:
-        stamp = dt.datetime.fromisoformat(
-            json.loads(j.read_text(encoding="utf-8"))["as_of"]).strftime("%H%M")
+        import run_identity
+        previous = json.loads(j.read_text(encoding="utf-8"))
+        stamp = (run_identity.require(previous["run_id"]) if "run_id" in previous else
+                 dt.datetime.fromisoformat(previous["as_of"]).strftime("%H%M"))
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise RuntimeError(f"Previous data block cannot be archived safely: {type(exc).__name__}") from None
     runs = DATA_DIR / "runs"
@@ -1797,23 +1789,24 @@ def _archive_previous_run(date: str) -> str | None:
     return suffix
 
 
-def main(today: dt.date | None = None) -> None:
+def main(today: dt.date | None = None, *, run_id: str | None = None) -> None:
     # Live feeds cannot reconstruct a historical (or future) session.
     current = pd.Timestamp.now(tz="America/New_York").date()
     if today is not None and today != current:
         raise ValueError(f"live gathering only supports today's ET date ({current}); requested {today}")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     BRIEFS_DIR.mkdir(parents=True, exist_ok=True)
+    import run_identity
+    run_id = run_identity.require(run_id) if run_id is not None else run_identity.new()
     d = gather(current)
+    d["run_id"] = run_id
     archived = _archive_previous_run(d["date"])   # only after gather() succeeds
     (DATA_DIR / f"{d['date']}.json").write_text(json.dumps(d, indent=2, default=str), encoding="utf-8")
     md = render_md(d)
     (DATA_DIR / f"{d['date']}.data.md").write_text(md, encoding="utf-8")
     print(md)
     if archived:
-        print(f"\n[gather] NOTE: an earlier run from {archived[:2]}:{archived[2:4]} ET already "
-              f"existed for {d['date']} — archived to data/runs/{d['date']}-{archived}.*  "
-              "Minute-resolution brief stamps may match multiple runs; retain all candidates.")
+        print(f"\n[gather] earlier block retained at data/runs/{d['date']}-{archived}.*")
     print(f"\n[gather] wrote data/{d['date']}.json + data/{d['date']}.data.md ; "
           f"the finished brief goes to briefs/{d['date']}.md")
 

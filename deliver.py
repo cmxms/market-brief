@@ -127,6 +127,9 @@ def _freshness_failure(md: str, date: str) -> str | None:
     try:
         payload = json.loads((config.DATA / f"{date}.json").read_text(encoding="utf-8"))
         errors = validate.stamp_errors(md, payload.get("as_of_et"))
+        import run_identity
+        if "run_id" in payload or run_identity.TRACE_RE.search(md):
+            errors.extend(run_identity.errors(md, payload.get("run_id")))
         if errors:
             return "could not determine freshness: " + "; ".join(errors)
         stamp = post_discord._parse_stamp(md)

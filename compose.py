@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 
 import config
 import validate
+import run_identity
 
 PROMPT = """You are writing today's market brief for {date}.
 
@@ -64,7 +65,8 @@ Rules that override everything else:
 """
 
 
-def run(date: str, data_md: Path, out: Path, log_path: Path) -> tuple[bool, str]:
+def run(date: str, data_md: Path, out: Path, log_path: Path,
+        *, run_id: str | None = None) -> tuple[bool, str]:
     """Generate the brief. Returns (ok, detail)."""
     settings = config.load_settings()
     model_cfg = settings.get("model", {})
@@ -80,6 +82,11 @@ def run(date: str, data_md: Path, out: Path, log_path: Path) -> tuple[bool, str]
         return result(False, f"failed: data block missing: {data_md}")
     if not reference.exists():
         return result(False, f"failed: reference brief missing: {reference}")
+    block_text = data_md.read_text(encoding="utf-8")
+    if run_id is not None:
+        errors = run_identity.errors(block_text, run_id)
+        if errors:
+            return result(False, "failed: data block identity: " + "; ".join(errors))
 
     # mkdtemp exclusively creates a new namespace; neither wall time nor mtimes
     # establish ownership. Retain failed attempts for diagnosis, never reuse them.
@@ -90,20 +97,25 @@ def run(date: str, data_md: Path, out: Path, log_path: Path) -> tuple[bool, str]
         candidate = attempt / "brief.md"
         claims_path = attempt / "claims.json"
         end_marker = f"<!-- market-brief complete: {attempt.name} -->"
+        snapshot = attempt / "data.md"
+        snapshot.write_text(block_text, encoding="utf-8")
     except OSError as exc:
         return result(False, f"failed: attempt creation ({type(exc).__name__})")
 
     prompt = PROMPT.format(
         date=date,
-        data_md=data_md,
+        data_md=snapshot,
         reference=reference,
         out_path=candidate,
         claims_path=claims_path,
         end_marker=end_marker,
-        max_chars=brief_cfg.get("max_chars", 5200),
-        target_chars=brief_cfg.get("target_chars", 4800),
+        max_chars=int(brief_cfg.get("max_chars", 5200)) - (len(run_identity.line(run_id)) + 1 if run_id else 0),
+        target_chars=int(brief_cfg.get("target_chars", 4800)) - (len(run_identity.line(run_id)) + 1 if run_id else 0),
     )
     prompt_file = attempt / "prompt.txt"
+    if run_id is not None:
+        prompt += (f"\nThe data block run_id is {run_id}. Do not copy its Run line: "
+                   "the parent appends the trace footer within the reserved character budget.\n")
     try:
         prompt_file.write_text(prompt, encoding="utf-8")
     except OSError as exc:
@@ -157,6 +169,9 @@ def run(date: str, data_md: Path, out: Path, log_path: Path) -> tuple[bool, str]
         brief = brief_bytes.decode("utf-8")
         if not brief.rstrip().endswith(end_marker):
             raise ValueError("missing attempt end-of-document marker or text after marker")
+        if run_id is not None:
+            brief = brief.rstrip()[:-len(end_marker)].rstrip() + "\n" + run_identity.line(run_id) + "\n" + end_marker
+            brief_bytes = brief.encode("utf-8")
         claims = json.loads(claims_bytes.decode("utf-8"))
         if not isinstance(claims, list) or any(
             not isinstance(row, dict) or any(
@@ -180,6 +195,8 @@ def run(date: str, data_md: Path, out: Path, log_path: Path) -> tuple[bool, str]
         errors, _ = validate.check(
             brief, date, display, int(brief_cfg.get("max_chars", 5200)), None
         )
+        if run_id is not None:
+            errors.extend(run_identity.errors(brief, run_id))
         if errors:
             raise ValueError("brief validation: " + "; ".join(errors))
 
@@ -187,9 +204,11 @@ def run(date: str, data_md: Path, out: Path, log_path: Path) -> tuple[bool, str]
         # It costs no writer turn and is never inferred from file existence.
         record = {
             "attempt": attempt.name, "date": date, "child_exit": proc.returncode,
+            "run_id": run_id,
             "brief": {"path": candidate.name, "sha256": hashlib.sha256(brief_bytes).hexdigest()},
             "claims": {"path": claims_path.name, "sha256": hashlib.sha256(claims_bytes).hexdigest()},
         }
+        candidate.write_bytes(brief_bytes)
         (attempt / "complete.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
         # Stage beside each destination for same-filesystem atomic replacement.
         # No canonical artifact is touched until every completeness check passed.

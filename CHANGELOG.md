@@ -6,6 +6,19 @@ version numbers; entries are dated.
 
 ## 2026-11-20
 
+### Added
+
+- **Run provenance from gather to delivery.** A UUID4 run ID now connects the data
+  JSON, compose input, a one-line Discord subtext footer and the run/compose-ok
+  logs. Retention uses the ID instead of a minute-resolution key, so same-minute
+  gathers are distinguishable. Reuse preserves the ID, legacy archives remain
+  readable, and legacy data is retained before an ID is assigned for recomposition.
+  Validation and delivery reject mismatches; an old brief is never retroactively
+  labelled. The footer counts against the unchanged 5,200-character ceiling.
+  Verified with 478 passing tests, including same-minute retention, and a real
+  compose/validate/Discord-preview dry run using an existing gathered block;
+  the JSON, Markdown input, brief and log carried the same ID. No messages posted.
+
 ### Fixed
 
 - **A single long paragraph could break a post part-way.** Discord caps a message at 2,000

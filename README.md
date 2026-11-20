@@ -165,6 +165,34 @@ Chicago, inside the 07:30–08:30 window.
 
 ## Where things live
 
+### Run provenance
+
+At run start, `run_brief.py` creates a UUID4 `run_id` (32 lowercase hexadecimal
+characters) before gathering. The same ID is stored in `data/<date>.json`, printed
+in `<date>.data.md`, logged on `run start` and `compose ok`, and appended after the
+brief's disclaimer as one Discord subtext line: `-# Run: <run_id>`.
+The parent adds this line deterministically; the writer's budget reserves its
+space. It remains reader-visible, counts against `brief.max_chars` (still 5,200),
+and survives validation, quarantine and Discord message splitting.
+
+Compose reads a retained snapshot of its input in its attempt directory.
+Validation requires the brief ID to match the JSON block; delivery rechecks an
+identified block immediately before sending, so a different same-minute block
+cannot silently pass on the freshness stamp alone. Superseded blocks live at
+`data/runs/<date>-<run_id>.json` and `.data.md`. Existing HHMM-keyed legacy
+archives remain readable and untouched; collision suffixes still preserve every
+candidate rather than overwrite an archive. The latest block remains at the
+date-only paths.
+
+`--skip-gather` and `--deliver-only` reuse the existing block's ID, not a new one.
+A legacy block without an ID can be recomposed with `--skip-gather`: its original
+JSON/Markdown pair is retained under the legacy HHMM key before an ID is added
+and the Markdown is regenerated from the same data. This does not establish
+provenance for any old brief. `--deliver-only` refuses an untraced legacy brief
+(exit 5); recompose it instead. Missing or mismatched identities fail closed.
+
+### Storage
+
 - Repository: code, tests, `playbook.md`, `market_holidays.yaml`,
   `t1_calendar.yaml`, the `briefs/` archive.
 - `<runtime>/data/` — gathered data blocks, plus superseded runs.

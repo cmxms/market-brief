@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import run_identity
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
@@ -21,7 +22,8 @@ TITLE_RE = re.compile(r"^# 📊 Market Brief — ")
 URL_RE = re.compile(r"https?://", re.IGNORECASE)
 COMPLETION_RE = re.compile(r"\n<!-- market-brief complete: attempt-[A-Za-z0-9_-]+ -->\s*\Z")
 FOOTER_RE = re.compile(
-    r"(?m)^---\s*\n\s*\*Not financial advice — situational awareness only\.\*\s*\Z"
+    r"(?m)^---\s*\n\s*\*Not financial advice — situational awareness only\.\*"
+    r"\s*(?:-# Run: [0-9a-f]{32}\s*)?\Z"
 )
 
 
@@ -285,7 +287,8 @@ def visible_text(brief: str) -> str:
 
 
 def check(brief: str, expected_date: str, display_date: str, max_chars: int,
-          data_warning: str | None, as_of_et: object = _NO_BLOCK) -> tuple[list[str], list[str]]:
+          data_warning: str | None, as_of_et: object = _NO_BLOCK,
+          run_id: object = _NO_BLOCK) -> tuple[list[str], list[str]]:
     """Return (errors, warnings). Any error means do not publish."""
     errors: list[str] = []
     warnings: list[str] = []
@@ -340,6 +343,8 @@ def check(brief: str, expected_date: str, display_date: str, max_chars: int,
             errors.append(f"empty section body {marker}")
 
     errors.extend(stamp_errors(text, as_of_et))
+    if run_id is not _NO_BLOCK:
+        errors.extend(run_identity.errors(text, run_id))
 
     if URL_RE.search(text):
         errors.append("contains a URL; the standing rule forbids source links")

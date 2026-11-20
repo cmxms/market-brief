@@ -33,6 +33,7 @@ from zoneinfo import ZoneInfo
 
 import config
 import validate
+import run_identity
 
 CHI = ZoneInfo("America/Chicago")
 ET = ZoneInfo("America/New_York")
@@ -147,6 +148,7 @@ def _run(argv: list[str] | None, state: dict) -> int:
     ap.add_argument("--deliver-only", action="store_true",
                     help="validate and deliver an existing brief without gathering or composing")
     args = ap.parse_args(argv)
+    run_id = None
 
     config.ensure_dirs()
     config.load_env()
@@ -156,11 +158,18 @@ def _run(argv: list[str] | None, state: dict) -> int:
     date = args.date or dt.datetime.now(ET).date().isoformat()
     day = dt.date.fromisoformat(date)
     display = validate.display_date(day)
+    data_json = config.DATA / f"{date}.json"
+    if (args.skip_gather or args.deliver_only) and data_json.exists():
+        existing = json.loads(data_json.read_text(encoding="utf-8"))
+        if "run_id" in existing:
+            run_id = run_identity.require(existing["run_id"])
+    if run_id is None:
+        run_id = run_identity.new()
 
     log_path = config.LOGS / f"{date}.log"
     state["log_path"] = log_path
     with log_path.open("a", encoding="utf-8", errors="replace") as fh:
-        _log(f"run start date={date} dry={args.dry} test={args.test}", fh)
+        _log(f"run start date={date} dry={args.dry} test={args.test} run_id={run_id}", fh)
 
         # Historical reconstruction is not implemented: never mix today's feeds
         # with another session's paths. Missing --skip-gather data still gathers.
@@ -227,7 +236,7 @@ def _run(argv: list[str] | None, state: dict) -> int:
                     import gather
                     gather.DATA_DIR = config.DATA
                     gather.BRIEFS_DIR = config.BRIEFS
-                    gather.main(day)
+                    gather.main(day, run_id=run_id)
                 except Exception as exc:  # noqa: BLE001 - reported with its type
                     _log(f"gather failed: {exc!r}", fh)
                     return 3
@@ -238,13 +247,27 @@ def _run(argv: list[str] | None, state: dict) -> int:
             payload = json.loads(data_json.read_text(encoding="utf-8"))
 
             # --- compose --------------------------------------------------
+            if args.skip_gather and "run_id" not in payload:
+                # Preserve the legacy pair before assigning composition identity.
+                # Never relabel an already-written brief.
+                import gather
+                gather.DATA_DIR = config.DATA
+                md = gather.render_md({**payload, "run_id": run_id})
+                gather._archive_previous_run(date)
+                payload["run_id"] = run_id
+                data_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                data_md.write_text(md, encoding="utf-8")
+                _log(f"legacy block retained; assigned run_id={run_id} for composition", fh)
+            if payload.get("run_id") != run_id:
+                _log("gathered block run_id does not match this run", fh)
+                return 3
             state["stage"] = "compose"
-            ok, detail = __import__("compose").run(date, data_md, out, log_path)
+            ok, detail = __import__("compose").run(date, data_md, out, log_path, run_id=run_id)
             _record_spend(date, per_run)
             if not ok:
                 _log(f"compose failed: {detail}", fh)
                 return 4
-            _log(f"compose ok: {detail}", fh)
+            _log(f"compose ok: run_id={run_id} {detail}", fh)
 
         warning = _data_warning(payload)
         _log(f"data as_of_et={payload.get('as_of_et')} gex_warning={bool(warning)}", fh)
@@ -256,6 +279,7 @@ def _run(argv: list[str] | None, state: dict) -> int:
         errors, warnings = validate.check(
             brief, date, display, max_chars, None,
             as_of_et=payload.get("as_of_et"),
+            run_id=payload.get("run_id"),
         )
         for w in warnings:
             _log(f"WARN {w}", fh)
@@ -270,7 +294,7 @@ def _run(argv: list[str] | None, state: dict) -> int:
         residual = []
         if quarantined:
             residual, _ = validate.check(brief, date, display, max_chars, None,
-                                         as_of_et=payload.get("as_of_et"))
+                                         as_of_et=payload.get("as_of_et"), run_id=payload.get("run_id"))
         residual.extend(validate.outside_data_errors(brief, issues))
         if residual:
             for error in residual:

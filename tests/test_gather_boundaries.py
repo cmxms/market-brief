@@ -49,7 +49,7 @@ def test_noncurrent_live_date_is_logged_and_refused(runner, date, skip):
 
 def test_existing_historical_block_can_skip_gather(runner, monkeypatch):
     path, gather = runner
-    (path / f"{DATE}.json").write_text("{}", encoding="utf-8")
+    (path / f"{DATE}.json").write_text(json.dumps({"run_id": "a" * 32}), encoding="utf-8")
     import compose
     process = Mock(return_value=(False, "synthetic stop after reuse"))
     monkeypatch.setattr(compose, "run", process)
@@ -145,16 +145,18 @@ def test_two_same_minute_gathers_keep_old_and_latest_pairs(monkeypatch, tmp_path
     fetch = Mock(side_effect=[{"date": str(current), "as_of": stamp, "sample": n} for n in range(3)])
     monkeypatch.setattr(G, "gather", fetch)
     monkeypatch.setattr(G, "render_md", lambda block: f"sample {block['sample']}")
-    for _ in range(3):
-        G.main(current)
+    ids = [f"{n:032x}" for n in range(3)]
+    for run_id in ids:
+        G.main(current, run_id=run_id)
     # Two replacements after an initial block archive both superseded pairs.
     runs = G.DATA_DIR / "runs"
     assert sorted(p.name for p in runs.iterdir()) == sorted([
-        f"{current}-0800.json", f"{current}-0800.data.md",
-        f"{current}-0800-001.json", f"{current}-0800-001.data.md",
+        f"{current}-{ids[0]}.json", f"{current}-{ids[0]}.data.md",
+        f"{current}-{ids[1]}.json", f"{current}-{ids[1]}.data.md",
     ])
-    for suffix, sample in (("0800", 0), ("0800-001", 1)):
+    for suffix, sample in ((ids[0], 0), (ids[1], 1)):
         assert json.loads((runs / f"{current}-{suffix}.json").read_text())["sample"] == sample
+        assert json.loads((runs / f"{current}-{suffix}.json").read_text())["run_id"] == suffix
         assert (runs / f"{current}-{suffix}.data.md").read_text() == f"sample {sample}"
     assert json.loads((G.DATA_DIR / f"{current}.json").read_text())["sample"] == 2
     assert (G.DATA_DIR / f"{current}.data.md").read_text() == "sample 2"
@@ -172,14 +174,15 @@ def test_default_date_tracks_et_not_chicago_midnight(runner, monkeypatch):
     monkeypatch.setattr(R.dt, "datetime", Clock)
     assert R.main(["--dry", "--ignore-window", "--force-weekend"]) == 3
     assert (path / "2026-11-21.log").exists()
-    gather.assert_called_once_with(dt.date(2026, 11, 21))
+    gather.assert_called_once_with(dt.date(2026, 11, 21), run_id=gather.call_args.kwargs["run_id"])
 
 
 @pytest.mark.parametrize("extra", [0, 1])
 def test_crlf_has_same_ceiling_at_both_real_gates(composer, monkeypatch, extra):
     monkeypatch.setattr(P, "alert_failure", Mock())
     run, process, out, _ = composer
-    brief = sized_brief(5200 + extra)
+    trace = "\n-# Run: " + "a" * 32
+    brief = sized_brief(5200 + extra - len(trace)) + trace
 
     def child(cmd, **kwargs):
         candidate, claims, end = outputs(cmd)
@@ -197,6 +200,7 @@ def test_crlf_has_same_ceiling_at_both_real_gates(composer, monkeypatch, extra):
     target = config.BRIEFS / f"{DATE}.md"
     target.write_bytes((brief + "\n<!-- market-brief complete: attempt-crlf -->").replace("\n", "\r\n").encode())
     (config.DATA / f"{DATE}.json").write_text(json.dumps({
+        "run_id": "a" * 32,
         "as_of_et": "Sat Nov 14, 2026 8:00 AM ET",
         "gex": {s: {v: {"regime": "positive"} for v in ("near_term", "full_chain")}
                 for s in ("SPY", "QQQ")},

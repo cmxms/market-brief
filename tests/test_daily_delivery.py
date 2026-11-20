@@ -20,7 +20,7 @@ import run_brief as R
 DATE = "2026-11-19"
 STAMP = "Thu Nov 19, 2026 9:20 AM ET"
 BRIEF = BODY.replace("Sat November 14, 2026", "Thu November 19, 2026").replace(
-    "Sat Nov 14, 2026 8:00 AM ET", STAMP) + "\n<!-- market-brief complete: attempt-d1 -->"
+    "Sat Nov 14, 2026 8:00 AM ET", STAMP) + "\n-# Run: " + "a" * 32 + "\n<!-- market-brief complete: attempt-d1 -->"
 ET = ZoneInfo("America/New_York")
 WEBHOOKS = ["https://example.invalid/a", "https://example.invalid/b"]
 BANNER = ("⚠ STALE DATA — pulled 2026-11-19 09:20 ET; sending 2026-11-19 09:31 ET. "
@@ -48,11 +48,12 @@ def isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(__import__("compose"), "run", forbidden)
     send = Mock()
     monkeypatch.setattr(P, "_send", send)
-    payload = {"as_of_et": STAMP, "event_gate": {"today_events": [], "today_tier2": []},
+    payload = {"run_id": "a" * 32, "as_of_et": STAMP, "event_gate": {"today_events": [], "today_tier2": []},
                "gex": {s: {v: {"regime": "positive"} for v in ("near_term", "full_chain")}
                        for s in ("SPY", "QQQ")}}
     (tmp_path / f"{DATE}.json").write_text(json.dumps(payload), encoding="utf-8")
     (tmp_path / f"{DATE}.md").write_text(BRIEF, encoding="utf-8")
+    (tmp_path / f"{DATE}.data.md").write_text("-# Run: " + "a" * 32, encoding="utf-8")
     return tmp_path, send, payload
 
 
@@ -186,7 +187,7 @@ def test_banner_rechunks_near_limit_and_retry_keeps_acknowledged_prefix(isolated
     _, send, _ = isolated
     if not initially_stale:
         monkeypatch.setattr(P, "_now_et", lambda: dt.datetime(2026, 11, 19, 9, 21, tzinfo=ET))
-    md = f"*Data pulled {STAMP}*\n" + "x" * 1800 + "\n## Next\n" + "y" * 1600
+    md = f"*Data pulled {STAMP}*\n" + "x" * 1800 + "\n## Next\n" + "y" * 1600 + "\n-# Run: " + "a" * 32
     attempts = []
     fail = True
 
@@ -244,7 +245,7 @@ def test_real_run_failure_paths_alert(isolated, monkeypatch, code):
     args = ["--date", DATE, "--ignore-window"]
     if code == 4:
         args.append("--skip-gather")
-        monkeypatch.setattr(__import__("compose"), "run", lambda *_: (False, "writer unavailable"))
+        monkeypatch.setattr(__import__("compose"), "run", lambda *_, **kw: (False, "writer unavailable"))
     elif code in (5, 7):
         args.append("--deliver-only")
         if code == 5:
@@ -270,7 +271,7 @@ def test_real_run_failure_paths_alert(isolated, monkeypatch, code):
 @pytest.mark.parametrize("complete", [False, True])
 def test_pre_d1_chunk_progress_survives_new_banner_budget(isolated, complete):
     _, send, _ = isolated
-    md = f"*Data pulled {STAMP}*\n" + "prefix " * 220 + "\n## Tail\n" + "suffix " * 220
+    md = f"*Data pulled {STAMP}*\n" + "prefix " * 220 + "\n## Tail\n" + "suffix " * 220 + "\n-# Run: " + "a" * 32
     original = P.chunk(md)
     old_id = D._identity(md, original)
     D.LEDGER.write_text("\n".join(json.dumps({

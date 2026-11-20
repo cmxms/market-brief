@@ -95,8 +95,9 @@ def test_playbook_title_date_at_both_gates(composer, monkeypatch, day, weekday, 
         monkeypatch.setattr(config, "load_env", lambda: None)
         monkeypatch.setattr(config, "DATA", config.STATE)
         monkeypatch.setattr(config, "LOGS", config.STATE)
-        (config.BRIEFS / f"{date}.md").write_text(brief + "\n" + MARKER, encoding="utf-8")
+        (config.BRIEFS / f"{date}.md").write_text(brief + "\n-# Run: " + "a" * 32 + "\n" + MARKER, encoding="utf-8")
         (config.DATA / f"{date}.json").write_text(json.dumps({
+            "run_id": "a" * 32,
             "as_of_et": "Sat Nov 14, 2026 8:00 AM ET",
             "gex": {s: {v: {"regime": "positive"} for v in ("near_term", "full_chain")}
                     for s in ("SPY", "QQQ")},
