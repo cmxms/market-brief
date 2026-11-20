@@ -8,15 +8,21 @@ version numbers; entries are dated.
 
 ### Fixed
 
-- **A finished brief was thrown away because the writer ran out of turns.** On 2026-11-19
-  `hermes` exited 1 after spending its 40-turn budget, and `compose.run()` treated any non-zero
-  exit as failure even though both output files had been written — so the run exited 4 and
-  nothing was posted. The exit code was the only signal available: hermes prints no cause, and
-  the turn-cap notice appears in the session transcript, not in the child's stdout. `compose.run()`
-  now judges the work instead: a non-zero exit is recovered when the brief and the claims ledger
-  were both written by this run and the brief is above a stub size, and the brief then faces
-  `validate.py` as usual. Everything else — no brief, an unwritten brief, a brief under 1,500
-  bytes, a missing ledger — is still a hard failure. Regression tests cover each case.
+- **A failed run can no longer publish an unfinished brief.** The first attempt at this fix
+  (recovering a brief when the writer ran out of turns) checked only that the brief and ledger were
+  recent, so an audit reproduced an unfinished draft plus a malformed ledger reaching delivery with
+  the run exiting 0. Replaced by an ownership contract: each attempt writes into its own
+  `state/compose-attempts/attempt-*/` directory that is never reused; the brief must end with an
+  attempt-specific marker; the ledger must parse as an array of objects with non-empty `claim`,
+  `source` (an HTTP(S) URL) and `retrieved` (YYYY-MM-DD); `validate.check` now rejects an empty
+  section body or a missing footer. Only after all of that passes does the run write
+  `complete.json` (attempt, child exit, artifact paths and SHA-256) and promote the checked bytes to
+  `briefs/<date>.md` and `state/claims-<date>.json`. A non-zero child exit is recoverable only then;
+  an exit-zero child is subject to the same checks, and timeouts stay fail-closed. The log
+  distinguishes "hermes exit 0", "recovered after a failed child (complete attempt)" and "failed".
+- **The completion marker no longer counts against the 5,200-character ceiling.** Metadata is
+  stripped before the length and content checks; a brief of exactly 5,200 characters passes, 5,201
+  does not. The marker never reaches a delivered message (pinned by a test).
 
 ### Changed
 
@@ -24,6 +30,10 @@ version numbers; entries are dated.
   the 5,200-character ceiling, so a long draft was trimmed with 20+ `patch` edits — 23 of them on
   11-19, against 11-12 on a normal day. It now aims at `brief.target_chars` (4,800, a new setting)
   and is told to write each file in one `write_file` call and leave it.
+- **The title-line date is the playbook's, unpadded.** `run_brief` and `compose` built the expected
+  date with `%d`, so the machine expected `Sat December 05, 2026` while the playbook writes
+  `Sat December 5, 2026` — every brief dated the 1st to the 9th would have been rejected. One shared
+  helper now builds the unpadded date, and a zero-padded title is tolerated rather than fatal.
 - **The prompt states the title-line format.** The 11-19 brief opened `Thu Nov 19, 2026`; the
   playbook requires the full month, and validation rejects the abbreviation. The writer now gets
   the exact shape instead of having to infer it from `playbook.md`.
