@@ -13,6 +13,7 @@ from test_compose_env import DATE, outputs
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
 import gather as G
+import post_discord as P
 import run_brief as R
 import validate as V
 
@@ -21,6 +22,7 @@ composer = environment.composer
 
 @pytest.fixture
 def runner(monkeypatch, tmp_path):
+    monkeypatch.setattr(P, "alert_failure", Mock())
     for name in ("STATE", "LOGS", "DATA", "BRIEFS", "PROJECT"):
         monkeypatch.setattr(config, name, tmp_path)
     monkeypatch.setattr(config, "ensure_dirs", lambda: None)
@@ -175,6 +177,7 @@ def test_default_date_tracks_et_not_chicago_midnight(runner, monkeypatch):
 
 @pytest.mark.parametrize("extra", [0, 1])
 def test_crlf_has_same_ceiling_at_both_real_gates(composer, monkeypatch, extra):
+    monkeypatch.setattr(P, "alert_failure", Mock())
     run, process, out, _ = composer
     brief = sized_brief(5200 + extra)
 

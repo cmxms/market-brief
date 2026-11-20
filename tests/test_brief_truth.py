@@ -32,6 +32,7 @@ def healthy_gex():
 
 @pytest.fixture
 def isolated(monkeypatch, tmp_path):
+    monkeypatch.setattr(P, "alert_failure", Mock())
     for name in ("DATA", "STATE", "BRIEFS", "LOGS", "PROJECT"):
         monkeypatch.setattr(config, name, tmp_path)
     monkeypatch.setattr(config, "ensure_dirs", lambda: None)
@@ -96,20 +97,20 @@ def test_matching_fresh_stamp_delivered(isolated, test_channel):
 
 @pytest.mark.parametrize("test_channel", [False, True])
 @pytest.mark.parametrize("now", [(9, 0), (9, 30)])
-def test_block_crossing_existing_release_threshold_refused(isolated, monkeypatch, test_channel, now):
+def test_block_crossing_existing_release_threshold_labelled(isolated, monkeypatch, test_channel, now):
     _, _, post, child = isolated
     monkeypatch.setattr(P, "_now_et", lambda: dt.datetime(2026, 11, 19, *now, tzinfo=ET))
-    assert run(*(["--test"] if test_channel else [])) == 7
-    post.assert_not_called()
-    child.assert_not_called()
+    assert run(*(["--test"] if test_channel else [])) == 0
+    assert (child if test_channel else post).call_count >= 1
+    assert "stale" in D.LEDGER.read_text(encoding="utf-8")
 
 
-def test_calendar_specific_release_crossing_refused(isolated):
+def test_calendar_specific_release_crossing_labelled(isolated):
     payload, save, post, child = isolated
     payload["event_gate"]["today_tier2"] = [{"time_et": "08:36", "name": "synthetic event"}]
     save()
-    assert run() == 7
-    post.assert_not_called()
+    assert run() == 0
+    assert "synthetic event" in post.call_args.args[0]
     child.assert_not_called()
 
 

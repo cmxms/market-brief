@@ -15,6 +15,7 @@ from test_compose_env import BODY, DATE, FOOTER, HEADERS, PARAGRAPH, outputs
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import compose as C
 import config
+import post_discord as P
 import run_brief as R
 import validate as V
 
@@ -204,6 +205,7 @@ def test_timeout_remains_fail_closed_even_with_artifacts(composer):
 
 @pytest.mark.parametrize("scenario", ["unfinished", "malformed", "stale", "complete"])
 def test_audit_scenarios_at_delivery_boundary(composer, monkeypatch, scenario):
+    monkeypatch.setattr(P, "alert_failure", Mock())
     _, process, _, _ = composer
     monkeypatch.setattr(config, "ensure_dirs", lambda: None)
     monkeypatch.setattr(config, "load_env", lambda: None)
