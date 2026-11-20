@@ -143,6 +143,7 @@ def test_partial_failure_and_retry_only_missing_destination(monkeypatch, capsys)
     targets = {w: "production:" + hashlib.sha256(w.encode("utf-8")).hexdigest()
                for w in (WEBHOOK_A, WEBHOOK_B)}
     assert [(r["date"], r["target"], r["status"]) for r in rows()] == [
+        (DATE, targets[WEBHOOK_A], "chunk_ok"),
         (DATE, targets[WEBHOOK_A], "ok"), (DATE, targets[WEBHOOK_B], "failed"),
     ]
     assert targets[WEBHOOK_B] in detail
@@ -163,7 +164,7 @@ def test_partial_failure_and_retry_only_missing_destination(monkeypatch, capsys)
     assert ok is True
     assert "already delivered" in detail
     assert calls == {WEBHOOK_A: 1, WEBHOOK_B: 2}
-    assert len(rows()) == 3
+    assert len(rows()) == 5
 
 
 def test_all_destinations_fail(monkeypatch, capsys):
@@ -183,17 +184,20 @@ def test_force_resends_every_destination(monkeypatch):
     assert D.deliver_production("brief", DATE)[0] is True
     assert D.deliver_production("brief", DATE, force=True)[0] is True
     assert Counter(call.args[0] for call in send.call_args_list) == {WEBHOOK_A: 2, WEBHOOK_B: 2}
-    assert [r["status"] for r in rows()] == ["ok"] * 4
+    assert [r["status"] for r in rows()] == [
+        "chunk_ok", "ok", "chunk_ok", "ok",
+        "started", "chunk_ok", "ok", "started", "chunk_ok", "ok",
+    ]
 
 
-def test_other_date_and_legacy_production_do_not_skip_destinations(monkeypatch):
+def test_legacy_production_skips_same_date_but_not_other_date(monkeypatch):
     D._record(DATE, "production", "ok", "legacy aggregate row")
     send = Mock()
     monkeypatch.setattr(P, "_send", send)
     assert D.deliver_production("brief", DATE)[0] is True
-    assert send.call_count == 2
+    assert send.call_count == 0
     assert D.deliver_production("brief", "2026-11-15")[0] is True
-    assert send.call_count == 4
+    assert send.call_count == 2
 
 
 def test_production_exception_detail_sanitized(monkeypatch):
@@ -230,7 +234,8 @@ def test_test_channel_send_and_force(monkeypatch, tmp_path):
     assert D.deliver_test("brief", DATE, "fake-test-channel")[0] is True
     assert D.deliver_test("brief", DATE, "fake-test-channel", force=True)[0] is True
     assert run.call_count == 2
-    assert [r["target"] for r in rows()] == ["test", "test"]
+    assert [r["target"] for r in rows()] == ["test:fake-test-channel"] * 5
+    assert [r["status"] for r in rows()] == ["chunk_ok", "ok", "started", "chunk_ok", "ok"]
     assert not list(tmp_path.glob("*.md"))
     assert run.call_args.kwargs["check"] is False
 

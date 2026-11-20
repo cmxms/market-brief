@@ -1,4 +1,4 @@
-"""Discord delivery, with a ledger so the same brief is never posted twice.
+"""Discord delivery with per-destination, per-brief acknowledged chunk progress.
 
 Production posts to every webhook configured in DISCORD_WEBHOOK_URL (A and B).
 Test posts to a single channel through Hermes's own Discord bot, which needs no
@@ -7,6 +7,7 @@ webhook and no new secret.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import tempfile
@@ -22,20 +23,29 @@ def _now() -> str:
     return datetime.now(UTC).astimezone().isoformat(timespec="seconds")
 
 
-def already_delivered(date: str, target: str) -> bool:
+def _rows() -> list[dict]:
     if not LEDGER.exists():
-        return False
+        return []
+    rows = []
     for line in LEDGER.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def already_delivered(date: str, target: str) -> bool:
+    for row in _rows():
         if row.get("date") == date and row.get("target") == target and row.get("status") == "ok":
             return True
     return False
 
 
-def _record(date: str, target: str, status: str, detail: str, chunks: int = 0) -> None:
+def _record(date: str, target: str, status: str, detail: str, chunks: int = 0,
+            *, brief_id: str | None = None, chunk_index: int | None = None) -> None:
     from post_discord import sanitize
 
     LEDGER.parent.mkdir(parents=True, exist_ok=True)
@@ -43,12 +53,50 @@ def _record(date: str, target: str, status: str, detail: str, chunks: int = 0) -
         f.write(json.dumps({
             "date": date, "target": target, "status": status,
             "detail": sanitize(detail), "chunks": chunks, "at": _now(),
+            **({"brief_id": brief_id} if brief_id is not None else {}),
+            **({"chunk_index": chunk_index} if chunk_index is not None else {}),
         }) + "\n")
 
 
 def _chunks(md: str) -> list[str]:
     import post_discord
-    return post_discord.chunk(md)
+    parts = post_discord.chunk(md)
+    post_discord._validate_chunks(parts)
+    return parts
+
+
+def _identity(md: str, parts: list[str]) -> str:
+    # Bind progress to both the exact source and its ordered chunk boundaries.
+    return hashlib.sha256(json.dumps([md, parts], ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _progress(date: str, target: str, brief_id: str, count: int,
+              legacy_targets: tuple[str, ...] = ()) -> int:
+    acknowledged: set[int] = set()
+    for row in _rows():
+        if row.get("date") != date:
+            continue
+        if "brief_id" not in row:
+            # Old aggregate successes retain their date-wide suppression meaning.
+            if row.get("target") in (target, *legacy_targets) and row.get("status") == "ok":
+                acknowledged.update(range(count))
+            continue
+        if row.get("target") != target or row.get("brief_id") != brief_id:
+            continue
+        if row.get("status") == "started":
+            acknowledged.clear()  # --force begins a new delivery, including after failure.
+        elif row.get("status") == "ok":
+            acknowledged.update(range(count))
+        elif row.get("status") == "chunk_ok":
+            index = row.get("chunk_index")
+            if type(index) is int and 0 <= index < count:
+                acknowledged.add(index)
+    return next((i for i in range(count) if i not in acknowledged), count)
+
+
+# An ambiguous timeout is NOT an acknowledgement. Retry that chunk (at-least-once):
+# skipping it could silently omit content. Discord supplies no idempotency key here,
+# so an accepted request whose response was lost can still be duplicated.
 
 
 def _freshness_failure(md: str, date: str) -> str | None:
@@ -103,39 +151,62 @@ def deliver_production(md: str, date: str, force: bool = False) -> tuple[bool, s
         _record(date, "production", "failed", repr(exc))
         return False, f"production delivery failed: {post_discord.sanitize(str(exc))}"
 
-    parts = _chunks(md)
+    try:
+        parts = _chunks(md)
+    except RuntimeError as exc:
+        return False, f"production delivery failed: {exc}"
+    brief_id = _identity(md, parts)
     failed: list[str] = []
     sent = 0
+    messages_sent = 0
     for webhook in webhooks:
         target = "production:" + post_discord.fingerprint(webhook)
-        # Legacy aggregate production rows cannot establish which destination
-        # succeeded; only destination-specific rows suppress a send.
-        if not force and already_delivered(date, target):
+        start = 0 if force else _progress(date, target, brief_id, len(parts), ("production",))
+        if start == len(parts):
             continue
         try:
-            summary = post_discord.post(md, webhook=webhook)
+            if force:
+                _record(date, target, "started", "forced delivery", len(parts), brief_id=brief_id)
+
+            def acknowledge(index: int, destination: str = target) -> None:
+                _record(date, destination, "chunk_ok", "acknowledged", len(parts),
+                        brief_id=brief_id, chunk_index=index)
+
+            summary = post_discord.post(md, webhook=webhook, start=start, on_ack=acknowledge)
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-            _record(date, target, "failed", repr(exc), len(parts))
+            _record(date, target, "failed", repr(exc), len(parts), brief_id=brief_id)
             failed.append(target)
         else:
-            _record(date, target, "ok", summary, len(parts))
+            _record(date, target, "ok", summary, len(parts), brief_id=brief_id)
             sent += 1
+            messages_sent += len(parts) - start
     if failed:
         return False, "production delivery failed; outstanding destinations: " + ", ".join(failed)
     if not sent:
         return True, "already delivered to production (ledger)"
-    return True, f"posted {len(parts)} message(s) to {sent} production destination(s)"
+    return True, f"posted {messages_sent} message(s) to {sent} production destination(s)"
 
 
 def deliver_test(md: str, date: str, channel_id: str, force: bool = False) -> tuple[bool, str]:
+    from post_discord import sanitize
+
     failure = _freshness_failure(md, date)
     if failure:
         return False, failure
-    if already_delivered(date, "test") and not force:
+    try:
+        parts = _chunks(md)
+    except RuntimeError as exc:
+        return False, f"test delivery failed: {exc}"
+    brief_id = _identity(md, parts)
+    target = "test:" + channel_id
+    start = 0 if force else _progress(date, target, brief_id, len(parts), ("test",))
+    if start == len(parts):
         return True, "already delivered to test channel (ledger)"
-    parts = _chunks(md)
-    sent = 0
-    for i, part in enumerate(parts, 1):
+    config.STATE.mkdir(parents=True, exist_ok=True)
+    if force:
+        _record(date, target, "started", "forced delivery", len(parts), brief_id=brief_id)
+    for index in range(start, len(parts)):
+        i, part = index + 1, parts[index]
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md",
                                          delete=False, dir=config.STATE) as tmp:
             tmp.write(part)
@@ -146,14 +217,18 @@ def deliver_test(md: str, date: str, channel_id: str, force: bool = False) -> tu
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
                 check=False,
             )
+        except (OSError, subprocess.SubprocessError) as exc:
+            _record(date, target, "failed", repr(exc), len(parts), brief_id=brief_id)
+            return False, f"test delivery failed on chunk {i}/{len(parts)}"
         finally:
             tmp_path.unlink(missing_ok=True)
         if proc.returncode != 0:
-            from post_discord import sanitize
-
             reason = sanitize(proc.stderr.strip())[:300]
-            _record(date, "test", "failed", f"chunk {i}/{len(parts)}: {reason}", sent)
+            _record(date, target, "failed", f"chunk {i}/{len(parts)}: {reason}",
+                    len(parts), brief_id=brief_id)
             return False, f"test delivery failed on chunk {i}/{len(parts)}"
-        sent += 1
-    _record(date, "test", "ok", f"sent {sent} chunk(s) to test channel", sent)
-    return True, f"sent {sent} message(s) to the test channel"
+        _record(date, target, "chunk_ok", "acknowledged", len(parts),
+                brief_id=brief_id, chunk_index=index)
+    _record(date, target, "ok", f"sent {len(parts)} chunk(s) to test channel",
+            len(parts), brief_id=brief_id)
+    return True, f"sent {len(parts) - start} message(s) to the test channel"
