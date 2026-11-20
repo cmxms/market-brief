@@ -126,10 +126,10 @@ def _freshness_failure(md: str, date: str) -> str | None:
 
     try:
         payload = json.loads((config.DATA / f"{date}.json").read_text(encoding="utf-8"))
+        md = validate.visible_text(md)
         errors = validate.stamp_errors(md, payload.get("as_of_et"))
         import run_identity
-        if "run_id" in payload or run_identity.TRACE_RE.search(md):
-            errors.extend(run_identity.errors(md, payload.get("run_id")))
+        errors.extend(run_identity.errors(md, payload.get("run_id"), footer=True))
         if errors:
             return "could not determine freshness: " + "; ".join(errors)
         stamp = post_discord._parse_stamp(md)
@@ -157,6 +157,7 @@ def _freshness_failure(md: str, date: str) -> str | None:
 def _banner(md: str, date: str) -> str:
     import post_discord as post
 
+    md = post.visible_text(md)
     stamp = post._parse_stamp(md)
     if stamp is None:  # Transport-only tests may stub the provenance gate.
         return ""

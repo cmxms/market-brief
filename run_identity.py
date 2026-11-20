@@ -22,12 +22,18 @@ def line(value: str) -> str:
     return f"-# Run: {require(value)}"
 
 
-def errors(brief: str, expected: object) -> list[str]:
+def errors(brief: str, expected: object, *, footer: bool = False) -> list[str]:
     try:
         expected = require(expected)
     except ValueError:
         return ["gathered block run_id is missing or invalid"]
     matches = list(TRACE_RE.finditer(brief))
-    if len(matches) != 1 or matches[0].group(1) != expected:
+    candidates = re.findall(r"(?m)^-# Run:.*$", brief)
+    if len(candidates) != 1 or len(matches) != 1 or matches[0].group(1) != expected:
         return ["Run trace does not exactly match gathered block run_id"]
+    if footer and not re.search(
+        r"(?m)^---[ \t]*\n\s*\*Not financial advice — situational awareness only\.\*"
+        r"\s*\n-# Run: " + re.escape(expected) + r"\Z", brief
+    ):
+        return ["Run trace must be the final line of the disclaimer footer"]
     return []

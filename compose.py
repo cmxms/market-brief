@@ -19,8 +19,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import config
-import validate
 import run_identity
+import validate
 
 PROMPT = """You are writing today's market brief for {date}.
 
@@ -196,7 +196,7 @@ def run(date: str, data_md: Path, out: Path, log_path: Path,
             brief, date, display, int(brief_cfg.get("max_chars", 5200)), None
         )
         if run_id is not None:
-            errors.extend(run_identity.errors(brief, run_id))
+            errors.extend(run_identity.errors(validate.visible_text(brief), run_id, footer=True))
         if errors:
             raise ValueError("brief validation: " + "; ".join(errors))
 

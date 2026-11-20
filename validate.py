@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import datetime as dt
 import re
-import run_identity
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
+
+import run_identity
+from reader_text import visible_text
 
 # Emoji-prefixed section headers, in the order the playbook fixes them.
 SECTION_MARKERS = ("## 📰", "## 📊", "## 🔁", "## 📈", "## 🚨", "## 🧭")
@@ -276,16 +278,6 @@ def display_date(day: dt.date) -> str:
     return f"{day:%a %B} {day.day}, {day:%Y}"
 
 
-def visible_text(brief: str) -> str:
-    """Ceiling applies to stripped, reader-visible Unicode text with LF newlines.
-
-    Normalize CRLF and lone CR just like a universal-newline file read, then
-    remove transport metadata. Both compose and runner use this measurement.
-    """
-    normalized = brief.replace("\r\n", "\n").replace("\r", "\n")
-    return COMPLETION_RE.sub("", normalized.strip()).strip()
-
-
 def check(brief: str, expected_date: str, display_date: str, max_chars: int,
           data_warning: str | None, as_of_et: object = _NO_BLOCK,
           run_id: object = _NO_BLOCK) -> tuple[list[str], list[str]]:
@@ -295,7 +287,10 @@ def check(brief: str, expected_date: str, display_date: str, max_chars: int,
 
     # The ceiling is on the reader-visible brief, not transport metadata.
     # Strip the completion marker before measuring or checking any content.
-    text = visible_text(brief)
+    try:
+        text = visible_text(brief)
+    except ValueError as exc:
+        return [str(exc)], warnings
     if not text:
         return ["brief is empty"], warnings
 
@@ -344,7 +339,7 @@ def check(brief: str, expected_date: str, display_date: str, max_chars: int,
 
     errors.extend(stamp_errors(text, as_of_et))
     if run_id is not _NO_BLOCK:
-        errors.extend(run_identity.errors(text, run_id))
+        errors.extend(run_identity.errors(text, run_id, footer=True))
 
     if URL_RE.search(text):
         errors.append("contains a URL; the standing rule forbids source links")
