@@ -23,6 +23,7 @@ BRIEF = BODY.replace("Sat November 14, 2026", "Thu November 19, 2026").replace(
     "Sat Nov 14, 2026 8:00 AM ET", STAMP) + "\n-# Run: " + "a" * 32 + "\n<!-- market-brief complete: attempt-d1 -->"
 ET = ZoneInfo("America/New_York")
 WEBHOOKS = ["https://example.invalid/a", "https://example.invalid/b"]
+REAL_SEND = P._send
 BANNER = ("⚠ STALE DATA — pulled 2026-11-19 09:20 ET; sending 2026-11-19 09:31 ET. "
           "A release window or the open has passed since the pull: 09:30 ET market open.")
 
@@ -337,3 +338,73 @@ def test_alert_reason_is_short_single_line_and_webhook_redacted(isolated):
     content = send.call_args.args[1]
     assert "[REDACTED]" in content and secret not in content
     assert "\n" not in content and len(content) < P.LIMIT
+
+
+DIAGNOSTICS = ["<!DOCTYPE html>", "<!-- unmatched", "-->", "<?",
+               "<!-- outer <!-- inner --> -->"]
+
+
+@pytest.mark.parametrize("reason", DIAGNOSTICS)
+@pytest.mark.parametrize("stage,code", [("gather", 3), ("compose", 4), ("validate", 5)])
+def test_failure_alert_sends_literal_diagnostics_per_destination(isolated, stage, code, reason):
+    _, send, _ = isolated
+    message = P.alert_failure(stage, reason, code)
+    assert [c.args for c in send.call_args_list] == [(w, message) for w in WEBHOOKS]
+    assert reason in message
+
+
+@pytest.mark.parametrize("long", [False, True])
+def test_failure_alert_short_and_split_messages_stay_bounded(isolated, monkeypatch, long):
+    _, send, _ = isolated
+    # The normal 500-character reason cap fits LIMIT. Lower the transport limit
+    # to exercise splitting without weakening reason truncation.
+    monkeypatch.setattr(P, "LIMIT", 160)
+    reason = "vendor unavailable" if not long else "<!-- ``` reason " * 100
+    message = P.alert_failure("gather", reason, 3)
+    assert " ".join(reason.split())[:500] in message
+    for target in WEBHOOKS:
+        parts = [c.args[1] for c in send.call_args_list if c.args[0] == target]
+        assert (len(parts) > 1) if long else (len(parts) == 1)
+        assert all(0 < len(part) <= P.LIMIT for part in parts)
+        assert "".join(parts) == message
+
+
+def test_failure_alert_redacts_token_before_literal_splitting(isolated, monkeypatch):
+    _, send, _ = isolated
+    monkeypatch.setattr(P, "LIMIT", 80)
+    token = "synthetic_token_" * 8
+    message = P.alert_failure("gather", f"<!DOCTYPE html> token={token}", 3)
+    assert token not in message and "[REDACTED]" in message
+    for target in WEBHOOKS:
+        text = "".join(c.args[1] for c in send.call_args_list if c.args[0] == target)
+        assert text == message and token not in text
+
+
+def test_literal_failure_alert_attempts_every_destination_after_failure(isolated):
+    _, send, _ = isolated
+    send.side_effect = [RuntimeError("transport down"), None]
+    with pytest.raises(RuntimeError, match="failure alert not posted"):
+        P.alert_failure("gather", "<!DOCTYPE html>", 3)
+    assert [c.args[0] for c in send.call_args_list] == WEBHOOKS
+
+
+def test_literal_failure_alert_suppresses_mentions(isolated, monkeypatch):
+    request = Mock(return_value=Mock(status_code=204))
+    monkeypatch.setattr(P, "_send", REAL_SEND)
+    monkeypatch.setattr(P.requests, "post", request)
+    P.alert_failure("gather", "<!-- @everyone @here <@123> -->", 3)
+    assert [c.args[0] for c in request.call_args_list] == WEBHOOKS
+    assert all(c.kwargs["json"]["allowed_mentions"] == {"parse": []}
+               for c in request.call_args_list)
+
+
+@pytest.mark.parametrize("name", DIAGNOSTICS)
+def test_banner_preserves_literal_calendar_diagnostics(isolated, name):
+    path, send, payload = isolated
+    payload["event_gate"]["today_events"] = [{"time_et": "09:25", "name": name}]
+    (path / f"{DATE}.json").write_text(json.dumps(payload), encoding="utf-8")
+    assert D.deliver_production(BRIEF, DATE)[0]
+    for target in WEBHOOKS:
+        parts = [c.args[1] for c in send.call_args_list if c.args[0] == target]
+        assert parts[0].startswith("⚠ STALE DATA") and name in parts[0]
+        assert all(len(part) <= P.LIMIT for part in parts)
