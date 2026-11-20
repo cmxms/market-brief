@@ -209,7 +209,11 @@ def test_audit_scenarios_at_delivery_boundary(composer, monkeypatch, scenario):
     monkeypatch.setattr(config, "load_env", lambda: None)
     monkeypatch.setattr(config, "DATA", config.STATE)
     monkeypatch.setattr(config, "LOGS", config.STATE)
-    (config.DATA / f"{DATE}.json").write_text("{}", encoding="utf-8")
+    (config.DATA / f"{DATE}.json").write_text(json.dumps({
+        "as_of_et": "Sat Nov 14, 2026 8:00 AM ET",
+        "gex": {s: {v: {"regime": "positive"} for v in ("near_term", "full_chain")}
+                for s in ("SPY", "QQQ")},
+    }), encoding="utf-8")
     (config.DATA / f"{DATE}.data.md").write_text("synthetic", encoding="utf-8")
     out = config.BRIEFS / f"{DATE}.md"
     ledger = config.STATE / f"claims-{DATE}.json"

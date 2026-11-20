@@ -41,14 +41,26 @@ def _log(msg: str, fh) -> None:
 
 
 def _data_warning(payload: dict) -> str | None:
-    for views in (payload.get("gex") or {}).values():
-        if not isinstance(views, dict):
+    gex = payload.get("gex")
+    if not isinstance(gex, dict) or not gex:
+        return "GEX unavailable: missing chains"
+    failures = []
+    for symbol in dict.fromkeys(("SPY", "QQQ", *gex)):
+        views = gex.get(symbol)
+        if not isinstance(views, dict) or not views:
+            failures.append(f"{symbol} GEX unavailable: missing chains")
+            continue
+        if views.get("error") or views.get("data_warning"):
+            failures.append(f"{symbol} GEX unavailable: {views.get('error') or views['data_warning']}")
             continue
         for view in ("near_term", "full_chain"):
             block = views.get(view)
-            if isinstance(block, dict) and block.get("data_warning"):
-                return str(block["data_warning"])
-    return None
+            reason = (block.get("error") or block.get("data_warning")) if isinstance(block, dict) else None
+            if not isinstance(block, dict) or not block:
+                reason = "missing chain"
+            if reason:
+                failures.append(f"{symbol} {view} GEX unavailable: {reason}")
+    return "; ".join(failures) or None
 
 
 def _month_spend() -> float:
@@ -177,7 +189,8 @@ def main(argv: list[str] | None = None) -> int:
         # --- validate -----------------------------------------------------
         brief = out.read_text(encoding="utf-8")
         errors, warnings = validate.check(
-            brief, date, display, int(settings.get("brief", {}).get("max_chars", 5200)), warning
+            brief, date, display, int(settings.get("brief", {}).get("max_chars", 5200)), warning,
+            as_of_et=payload.get("as_of_et"),
         )
         for w in warnings:
             _log(f"WARN {w}", fh)
