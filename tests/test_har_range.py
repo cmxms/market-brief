@@ -12,10 +12,11 @@ import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import gather as G
-import har_range as H
 import test_compose_env as environment
 from test_compose_env import BODY, DATE, outputs
+
+import gather as G
+import har_range as H
 
 composer = environment.composer
 
