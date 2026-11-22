@@ -67,8 +67,12 @@ Rules that override everything else:
 
 
 def run(date: str, data_md: Path, out: Path, log_path: Path,
-        *, run_id: str | None = None) -> tuple[bool, str]:
-    """Generate the brief. Returns (ok, detail)."""
+        *, run_id: str | None = None, claims_out: Path | None = None) -> tuple[bool, str]:
+    """Generate and atomically save validated artifacts. Returns (ok, detail).
+
+    Preview callers supply attempt-local destinations for both artifacts.
+    Otherwise the claims destination defaults to the canonical date ledger.
+    """
     settings = config.load_settings()
     model_cfg = settings.get("model", {})
     brief_cfg = settings.get("brief", {})
@@ -246,12 +250,12 @@ def run(date: str, data_md: Path, out: Path, log_path: Path,
         (attempt / "complete.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
         # Stage beside each destination for same-filesystem atomic replacement.
         # No canonical artifact is touched until every completeness check passed.
-        canonical_claims = config.STATE / f"claims-{date}.json"
-        staged_claims = canonical_claims.with_suffix(f".{attempt.name}.tmp")
+        claims_out = claims_out if claims_out is not None else config.STATE / f"claims-{date}.json"
+        staged_claims = claims_out.with_suffix(f".{attempt.name}.tmp")
         staged_brief = out.with_suffix(f".{attempt.name}.tmp")
         staged_claims.write_bytes(claims_bytes)
         staged_brief.write_bytes(brief_bytes)
-        staged_claims.replace(canonical_claims)
+        staged_claims.replace(claims_out)
         staged_brief.replace(out)
     except (OSError, UnicodeError, ValueError) as exc:
         reason = str(exc) if isinstance(exc, ValueError) else type(exc).__name__

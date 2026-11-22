@@ -152,6 +152,10 @@ def test_legacy_skip_then_recompose_and_deliver_only_keep_identity(composer, mon
     assert (config.DATA / "runs" / f"{DATE}-0800.data.md").read_bytes() == original[1]
     assert json.loads(data.read_text())["run_id"] == ID
     assert R.main(flags + ["--skip-gather"]) == 0
+    # Dry compositions no longer publish an archive for deliver-only to reuse.
+    out = config.BRIEFS / f"{DATE}.md"
+    assert not out.exists()
+    out.write_text(BODY + "\n" + I.line(ID), encoding="utf-8")
     assert R.main(flags + ["--deliver-only"]) == 0
     generated.assert_called_once()
     result = (config.BRIEFS / f"{DATE}.md").read_text(encoding="utf-8")

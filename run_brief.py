@@ -29,7 +29,9 @@ import argparse
 import datetime as dt
 import json
 import sys
+import tempfile
 import uuid
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import config
@@ -214,6 +216,7 @@ def _run(argv: list[str] | None, state: dict) -> int:
         data_json = config.DATA / f"{date}.json"
         data_md = config.DATA / f"{date}.data.md"
         out = config.BRIEFS / f"{date}.md"
+        claims_path = config.STATE / f"claims-{date}.json"
         payload: dict = {}
 
         if args.deliver_only:
@@ -264,7 +267,17 @@ def _run(argv: list[str] | None, state: dict) -> int:
                 _log("gathered block run_id does not match this run", fh)
                 return 3
             state["stage"] = "compose"
-            ok, detail = __import__("compose").run(date, data_md, out, log_path, run_id=run_id)
+            compose_options = {}
+            if args.dry:
+                # Reserve this preview's own namespace, never the delivered archive.
+                attempts = config.STATE / "compose-attempts"
+                attempts.mkdir(parents=True, exist_ok=True)
+                preview = Path(tempfile.mkdtemp(prefix="preview-", dir=attempts))
+                out = preview / "brief.md"
+                claims_path = preview / "claims.json"
+                compose_options["claims_out"] = claims_path
+            ok, detail = __import__("compose").run(
+                date, data_md, out, log_path, run_id=run_id, **compose_options)
             _record_spend(date, per_run)
             if not ok:
                 _log(f"compose failed: {detail}", fh)
@@ -306,7 +319,6 @@ def _run(argv: list[str] | None, state: dict) -> int:
             _log("QUARANTINE " + json.dumps(record, ensure_ascii=False), fh)
         _log(f"validation passed ({len(validate.visible_text(brief))} chars)", fh)
 
-        claims_path = config.STATE / f"claims-{date}.json"
         if claims_path.exists():
             try:
                 claims = json.loads(claims_path.read_text(encoding="utf-8"))
