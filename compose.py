@@ -13,6 +13,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -83,6 +84,19 @@ def run(date: str, data_md: Path, out: Path, log_path: Path,
     if not reference.exists():
         return result(False, f"failed: reference brief missing: {reference}")
     block_text = data_md.read_text(encoding="utf-8")
+    har_enabled = os.environ.get("MARKET_BRIEF_HAR_ENABLED") == "1"
+    har_line = None
+    if har_enabled:
+        # This line was rendered by gather, never by the narrative model. A
+        # reused block lacking the optional estimate cannot supply a fallback.
+        matches = re.findall(r"^- (Volatility \(HAR, NQ\): .+)$", block_text, re.MULTILINE)
+        if (len(matches) == 1 and block_text.startswith(f"# BRIEF DATA BLOCK — {date}\n")
+                and re.fullmatch(r"Volatility \(HAR, NQ\): (?:~\d+ pts expected range \(10–90: \d+–\d+\)(?: — outside training range)?|omitted — [\w (),.-]+)", matches[0])):
+            har_line = matches[0]
+        else:
+            har_line = "Volatility (HAR, NQ): omitted — no estimate in this session's data block"
+    # Never expose an old enabled block's line to a flag-off writer.
+    block_text = re.sub(r"^- Volatility \(HAR, NQ\): .*\n?", "", block_text, flags=re.MULTILINE)
     if run_id is not None:
         errors = run_identity.errors(block_text, run_id)
         if errors:
@@ -109,13 +123,15 @@ def run(date: str, data_md: Path, out: Path, log_path: Path,
         out_path=candidate,
         claims_path=claims_path,
         end_marker=end_marker,
-        max_chars=int(brief_cfg.get("max_chars", 5200)) - (len(run_identity.line(run_id)) + 1 if run_id else 0),
-        target_chars=int(brief_cfg.get("target_chars", 4800)) - (len(run_identity.line(run_id)) + 1 if run_id else 0),
+        max_chars=int(brief_cfg.get("max_chars", 5200)) - (len(run_identity.line(run_id)) + 1 if run_id else 0) - (len(har_line) + 2 if har_line else 0),
+        target_chars=int(brief_cfg.get("target_chars", 4800)) - (len(run_identity.line(run_id)) + 1 if run_id else 0) - (len(har_line) + 2 if har_line else 0),
     )
     prompt_file = attempt / "prompt.txt"
     if run_id is not None:
         prompt += (f"\nThe data block run_id is {run_id}. Do not copy its Run line: "
                    "the parent appends the trace footer within the reserved character budget.\n")
+    if har_enabled:
+        prompt += "\nDo not write a HAR range line. The parent inserts it in Macro pulse within the reserved budget.\n"
     try:
         prompt_file.write_text(prompt, encoding="utf-8")
     except OSError as exc:
@@ -169,6 +185,24 @@ def run(date: str, data_md: Path, out: Path, log_path: Path,
         brief = brief_bytes.decode("utf-8")
         if not brief.rstrip().endswith(end_marker):
             raise ValueError("missing attempt end-of-document marker or text after marker")
+        if not har_enabled:
+            # A retained reference or an uncooperative writer cannot enable HAR.
+            without_har = re.sub(r"^(?:- )?Volatility \(HAR, NQ\): .*\r?\n?", "", brief, flags=re.MULTILINE)
+            if without_har != brief:
+                brief = without_har
+                brief_bytes = brief.encode("utf-8")
+        if har_line:
+            header = "## 📈 Macro pulse (moves, not levels)"
+            if brief.count(header) != 1:
+                raise ValueError("HAR insertion requires one canonical Macro pulse section")
+            # Strip a model-written duplicate, then insert immediately before
+            # the next section. All final structural/length checks still apply.
+            brief = re.sub(r"^(?:- )?Volatility \(HAR, NQ\): .*\n?", "", brief, flags=re.MULTILINE)
+            position = brief.find("\n## ", brief.index(header) + len(header))
+            if position < 0:
+                raise ValueError("HAR insertion requires the next canonical section")
+            brief = brief[:position].rstrip() + "\n" + har_line + "\n" + brief[position:]
+            brief_bytes = brief.encode("utf-8")
         if run_id is not None:
             brief = brief.rstrip()[:-len(end_marker)].rstrip() + "\n" + run_identity.line(run_id) + "\n" + end_marker
             brief_bytes = brief.encode("utf-8")

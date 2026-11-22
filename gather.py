@@ -1443,6 +1443,16 @@ def gather(today: dt.date | None = None) -> dict:
         "finnhub": finnhub_news(_finnhub_key()),
     }
     block["source_crosscheck"] = source_crosscheck(block["macro_pulse"].get("source_samples", {}))
+    if os.environ.get("MARKET_BRIEF_HAR_ENABLED") == "1":
+        from dataclasses import asdict
+
+        from har_range import HarRangeUnavailable, forecast_range
+
+        try:
+            estimate = forecast_range(os.environ.get("MARKET_BRIEF_NQ_PARQUET"), today)
+            block["har_range"] = asdict(estimate)
+        except HarRangeUnavailable as exc:
+            block["har_range"] = {"omitted": str(exc)}
     return block
 
 
@@ -1464,6 +1474,19 @@ def _bn(x) -> str:
         return f"{x / 1e9:+.2f}bn"
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Gamma total unreadable: {type(exc).__name__}") from None
+
+
+def har_range_line(estimate: dict) -> str:
+    """House-style plain line; all displayed point amounts round half-up to five."""
+    if estimate.get("omitted"):
+        return "Volatility (HAR, NQ): omitted — " + estimate["omitted"]
+
+    def points(value):
+        return int(np.floor(float(value) / 5 + 0.5)) * 5
+
+    warning = " — outside training range" if estimate.get("extrapolated") else ""
+    return (f"Volatility (HAR, NQ): ~{points(estimate['range_points'])} pts expected range "
+            f"(10–90: {points(estimate['band80_low'])}–{points(estimate['band80_high'])}){warning}")
 
 
 def render_md(d: dict) -> str:
@@ -1634,6 +1657,9 @@ def render_md(d: dict) -> str:
                  f"{ts['spread_raw_unaligned']:+} — do NOT quote that.")
     elif ts:
         L.append(f"- TERM STRUCTURE: ⚠️ UNAVAILABLE — {ts.get('note')}")
+
+    if os.environ.get("MARKET_BRIEF_HAR_ENABLED") == "1" and "har_range" in d:
+        L.append("- " + har_range_line(d["har_range"]))
 
     cc = d.get("source_crosscheck", {})
     if cc:

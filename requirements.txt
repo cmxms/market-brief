@@ -1,5 +1,6 @@
 httpx
 pandas
+pyarrow==26.0.1
 pyyaml
 yfinance
 requests

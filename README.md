@@ -111,7 +111,74 @@ key in it is documented with its default, so a missing file changes nothing.
 Two worth setting on a fresh install: `[model] name` (which model writes the
 brief) and `[discord] test_channel_id` (where `--test` posts).
 
-### Check it works
+### Optional NQ session range (default off)
+
+HAR estimates the next full NQ/CME session's high-low range in index points,
+not direction and not dollar P&L. It is disabled unless
+`MARKET_BRIEF_HAR_ENABLED=1` exactly. The other values below do nothing while
+it is disabled. Set them in the process environment or `<runtime>/config/.env`;
+no launch-directory-relative data paths are accepted.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MARKET_BRIEF_HAR_ENABLED` | unset/off | Only `1` enables gathering and the brief line. |
+| `MARKET_BRIEF_NQ_PARQUET` | unset | Absolute path to the external continuous NQ one-minute parquet. No bundled data or personal-path default. |
+
+
+The reader uses pandas' parquet support and requires PyArrow to produce a forecast;
+the pinned engine is included in `requirements.txt`. Without an engine, or with
+missing/unreadable/stale/insufficient data, the range is omitted
+and one plain line gives the reason. Nothing installs software automatically and
+no previous estimate, median or zero is substituted. Reusing a data block that
+has no HAR estimate also produces an omission, not a fresh estimate.
+Freshness always requires zero missing eligible sessions between the last usable
+session and the target. There is no stale-session allowance; the former
+`MARKET_BRIEF_HAR_MAX_STALE_SESSIONS` variable has no effect.
+
+Input columns: timezone-aware `ts_event` (start-stamped, ordered unique whole
+minutes), `open`, `high`, `low`, `close`, `symbol`, `source`, `adj_offset`.
+Prices must be finite positive NQ index points and carry additive adjustment
+provenance. Outright NQ contract symbols or `NQ=F` are accepted. A session with
+an internal contract/source/offset seam is excluded; `vendor` and `state` origins
+for the same zero-offset `NQ=F` instrument are equivalent.
+
+Session D runs from D-1 18:00 to D 17:00 America/New_York. Every bar at or after
+D's opening cutoff is excluded before price or identity validation. Historical
+sessions need at least 95% of aligned five-minute closes and valid OHLC; weekends,
+holidays and conservative short-session dates (July 3, December 24, Friday after
+Thanksgiving) are excluded. This coverage threshold can miss session extrema;
+it is not a guarantee that every minute is present. Lags bridge excluded sessions.
+Vendor continuous-contract identity remains limited by the supplied provenance.
+
+The fit uses exactly 400 prior observations after a 22-session lag warm-up:
+log previous range, log arithmetic mean of five prior ranges, and log arithmetic
+mean of 22 prior ranges. The point uses the log-normal correction (residual
+SSE/396), without clipping to historical extrema. The 10–90 bounds use mu plus
+empirical training log-residual quantiles, not independent calibration data.
+The result includes an `extrapolated` flag when the corrected point falls outside
+the observed training-target range; the brief appends `— outside training range`.
+The result also includes as-of/target dates, fit size, and an optional percentile
+against causal forecasts in the prior 365 days (at least 100 needed). The brief
+does not display that percentile or imply a directional probability.
+
+Gather retains the structured estimate in its data block. Compose inserts its
+plain, nearest-five-point line deterministically in Macro pulse, within the
+unchanged character ceiling, before validation. Example shape (not market data):
+`Volatility (HAR, NQ): ~800 pts expected range (10–90: 450–1200)`.
+Point and band values remain unrounded until this single half-up rendering step.
+No writer-selected figures, confidence claims or hit rates are added.
+
+With the flag off, gathering does not read the parquet or add HAR data, and the
+gather renderer is unchanged. Compose deliberately strips matching HAR lines
+from retained inputs and writer output even when disabled. Writer bytes are
+preserved when no such line needs removal; unconditional byte-identical output
+is not promised for retained HAR content.
+
+The initial audit found defects; these repairs are **not audited**. The feature
+remains off pending fresh-session review of the repair.
+Adding it does not change any schedule or delivery configuration.
+
+### Check the pipeline
 
 ```bash
 .venv/Scripts/python.exe run_brief.py --dry --ignore-window --force-weekend

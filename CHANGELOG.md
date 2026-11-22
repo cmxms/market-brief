@@ -4,6 +4,36 @@ Notable changes to market-brief, newest first. Format follows
 [Keep a Changelog](https://keepachangelog.com/). This project does not publish
 version numbers; entries are dated.
 
+## 2026-11-21
+
+### Added
+
+- **NQ session-range volatility estimate in the brief (enabled 2026-11-21).** A pre-session forecast of the
+  next full CME session's high-low range in index points: causal 400-observation log-range regression,
+  empirical 10–90 bounds from training residuals, either-side extrapolation allowed, deterministic
+  nearest-five-point rendering inserted before brief validation, gated on `MARKET_BRIEF_HAR_ENABLED=1` and
+  configured by `MARKET_BRIEF_NQ_PARQUET`. No fallback figures: a missing, stale or short history renders
+  `omitted — <reason>` and says why.
+  Verification: 572 tests passed in the project venv (52 HAR regressions); real-data aggregation matched the
+  2,396 frozen research sessions; repeated estimates matched; source checksum unchanged.
+
+### Fixed
+
+- **Clip at the training maximum removed.** It substituted a historical extreme for the model's answer and
+  built the band around the substitute — on a record-volatility session it returned 1466.43 where the model
+  said 1480.66. Forecasts outside the observed range now stand, marked `outside training range`.
+- **`MARKET_BRIEF_HAR_MAX_STALE_SESSIONS` removed.** A positive allowance published a forecast built from
+  inputs one session stale as though it were current. No missing eligible session is tolerated; the variable
+  now has no effect.
+- **Double rounding corrected.** A single half-up step to the nearest five points; 792.5 renders 795, not 790.
+
+### Known gaps
+
+- Two read-only audits; the second ran on a different model and returned no actionable findings. Residuals are
+  fitted, not independent calibration data; partial-session extrema and vendor continuous-contract provenance
+  remain limitations. A `--dry` run currently rewrites an archived brief — tracked in the workspace worklist,
+  not fixed here.
+
 ## 2026-11-20
 
 ### Added
