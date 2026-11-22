@@ -146,16 +146,16 @@ def test_legacy_skip_then_recompose_and_deliver_only_keep_identity(composer, mon
         return Mock(returncode=0, stdout="", stderr="")
 
     process.side_effect = child
-    flags = ["--date", DATE, "--dry", "--ignore-window", "--force-weekend"]
+    monkeypatch.setattr(D, "deliver_production", Mock(return_value=(True, "stubbed")))
+    monkeypatch.setattr(D, "record_quarantine", Mock())
+    flags = ["--date", DATE, "--ignore-window", "--force-weekend"]
     assert R.main(flags + ["--skip-gather"]) == 0
     assert (config.DATA / "runs" / f"{DATE}-0800.json").read_bytes() == original[0]
     assert (config.DATA / "runs" / f"{DATE}-0800.data.md").read_bytes() == original[1]
     assert json.loads(data.read_text())["run_id"] == ID
     assert R.main(flags + ["--skip-gather"]) == 0
-    # Dry compositions no longer publish an archive for deliver-only to reuse.
     out = config.BRIEFS / f"{DATE}.md"
-    assert not out.exists()
-    out.write_text(BODY + "\n" + I.line(ID), encoding="utf-8")
+    assert out.exists()
     assert R.main(flags + ["--deliver-only"]) == 0
     generated.assert_called_once()
     result = (config.BRIEFS / f"{DATE}.md").read_text(encoding="utf-8")
@@ -213,5 +213,7 @@ def test_new_run_identity_exists_before_real_gather_entry(composer, monkeypatch)
     process.side_effect = child
     assert R.main(["--date", date, "--dry", "--ignore-window", "--force-weekend", "--force-holiday"]) == 0
     generated.assert_called_once()
-    assert json.loads((config.DATA / f"{date}.json").read_text())["run_id"] == ID
-    assert I.errors((config.DATA / f"{date}.data.md").read_text(encoding="utf-8"), ID) == []
+    assert not (config.DATA / f"{date}.json").exists()
+    preview = next((config.STATE / "compose-attempts").glob("preview-*"))
+    assert json.loads((preview / f"{date}.json").read_text())["run_id"] == ID
+    assert I.errors((preview / f"{date}.data.md").read_text(encoding="utf-8"), ID) == []

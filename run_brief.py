@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import shutil
 import sys
 import tempfile
 import uuid
@@ -232,6 +233,37 @@ def _run(argv: list[str] | None, state: dict) -> int:
                 _log(f"monthly estimate {spent:.2f} + {per_run:.2f} exceeds cap {cap:.2f}; refusing", fh)
                 return 8
 
+            compose_options = {}
+            data_dir = config.DATA
+            briefs_dir = config.BRIEFS
+            if args.dry:
+                # Allocate before gathering or upgrading retained legacy inputs.
+                state["stage"] = "compose"
+                attempts = config.STATE / "compose-attempts"
+                try:
+                    attempts.mkdir(parents=True, exist_ok=True)
+                    preview = Path(tempfile.mkdtemp(prefix="preview-", dir=attempts))
+                except OSError as exc:
+                    _log(f"compose failed: preview creation ({type(exc).__name__})", fh)
+                    return 4
+                data_dir = preview
+                briefs_dir = preview
+                retained_json, retained_md = data_json, data_md
+                data_json = preview / retained_json.name
+                data_md = preview / retained_md.name
+                if args.skip_gather and retained_json.exists():
+                    state["stage"] = "gather"
+                    try:
+                        shutil.copyfile(retained_json, data_json)
+                        if retained_md.exists():
+                            shutil.copyfile(retained_md, data_md)
+                    except OSError as exc:
+                        _log(f"gather failed: preview input copy ({type(exc).__name__})", fh)
+                        return 3
+                out = preview / "brief.md"
+                claims_path = preview / "claims.json"
+                compose_options["claims_out"] = claims_path
+
             # --- gather ---------------------------------------------------
             state["stage"] = "gather"
             if args.skip_gather and data_json.exists():
@@ -239,8 +271,8 @@ def _run(argv: list[str] | None, state: dict) -> int:
             else:
                 try:
                     import gather
-                    gather.DATA_DIR = config.DATA
-                    gather.BRIEFS_DIR = config.BRIEFS
+                    gather.DATA_DIR = data_dir
+                    gather.BRIEFS_DIR = briefs_dir
                     gather.main(day, run_id=run_id)
                 except Exception as exc:  # noqa: BLE001 - reported with its type
                     _log(f"gather failed: {exc!r}", fh)
@@ -256,7 +288,7 @@ def _run(argv: list[str] | None, state: dict) -> int:
                 # Preserve the legacy pair before assigning composition identity.
                 # Never relabel an already-written brief.
                 import gather
-                gather.DATA_DIR = config.DATA
+                gather.DATA_DIR = data_dir
                 md = gather.render_md({**payload, "run_id": run_id})
                 gather._archive_previous_run(date)
                 payload["run_id"] = run_id
@@ -267,23 +299,9 @@ def _run(argv: list[str] | None, state: dict) -> int:
                 _log("gathered block run_id does not match this run", fh)
                 return 3
             state["stage"] = "compose"
-            compose_options = {}
-            if args.dry:
-                # Reserve this preview's own namespace, never the delivered archive.
-                attempts = config.STATE / "compose-attempts"
-                try:
-                    attempts.mkdir(parents=True, exist_ok=True)
-                    preview = Path(tempfile.mkdtemp(prefix="preview-", dir=attempts))
-                except OSError as exc:
-                    _record_spend(date, per_run)
-                    _log(f"compose failed: preview creation ({type(exc).__name__})", fh)
-                    return 4
-                out = preview / "brief.md"
-                claims_path = preview / "claims.json"
-                compose_options["claims_out"] = claims_path
             ok, detail = __import__("compose").run(
-                date, data_md, out, log_path, run_id=run_id, **compose_options)
-            _record_spend(date, per_run)
+                date, data_md, out, log_path, run_id=run_id,
+                record_invocation=lambda: _record_spend(date, per_run), **compose_options)
             if not ok:
                 _log(f"compose failed: {detail}", fh)
                 return 4

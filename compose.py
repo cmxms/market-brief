@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -67,11 +68,14 @@ Rules that override everything else:
 
 
 def run(date: str, data_md: Path, out: Path, log_path: Path,
-        *, run_id: str | None = None, claims_out: Path | None = None) -> tuple[bool, str]:
+        *, run_id: str | None = None, claims_out: Path | None = None,
+        record_invocation: Callable[[], None] | None = None) -> tuple[bool, str]:
     """Generate and atomically save validated artifacts. Returns (ok, detail).
 
     Preview callers supply attempt-local destinations for both artifacts.
     Otherwise the claims destination defaults to the canonical date ledger.
+    record_invocation charges a launched child, including failures and timeouts,
+    but not preparation failures or an OS refusal to launch.
     """
     settings = config.load_settings()
     model_cfg = settings.get("model", {})
@@ -168,12 +172,16 @@ def run(date: str, data_md: Path, out: Path, log_path: Path,
                                   errors="replace", timeout=int(model_cfg.get("run_budget_seconds", 900)) + 120,
                                   check=False)
         except subprocess.TimeoutExpired:
+            if record_invocation is not None:
+                record_invocation()
             log.write("failed: compose timed out\n")
             return False, "failed: compose timed out"
         except OSError as exc:
             detail = f"failed: compose launch failed with filtered environment ({type(exc).__name__}, errno {exc.errno})"
             log.write(detail + "\n")
             return False, detail
+        if record_invocation is not None:
+            record_invocation()
         log.write(proc.stdout or "")
         if proc.stderr:
             log.write("\n--- stderr ---\n" + proc.stderr)
