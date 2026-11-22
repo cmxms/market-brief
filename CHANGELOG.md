@@ -4,6 +4,31 @@ Notable changes to market-brief, newest first. Format follows
 [Keep a Changelog](https://keepachangelog.com/). This project does not publish
 version numbers; entries are dated.
 
+## 2026-11-22
+
+### Fixed
+
+- **A `--dry` preview no longer touches delivered artifacts.** The preview composed into the date's
+  canonical paths, so running it replaced `briefs/<date>.md` and the claims ledger with fresh text; on
+  2026-11-20 that rewrote the already-delivered brief (31 lines) until it was restored from git.
+- **A preview also replaced the delivered brief's inputs.** Gathering wrote the date's canonical data
+  block before composition, so a later `--deliver-only` retry refused the real brief because its recorded
+  run ID no longer matched the block. The preview now reserves its own namespace before gathering, points
+  gather's output and the runner's data paths there, and copies retained legacy inputs before any run-ID
+  upgrade, so the legacy upgrade happens on preview-local files.
+- **Spend was recorded for compose attempts that never launched a model.** A preview that failed to
+  allocate its folder appended the per-run estimate to the usage ledger, which could refuse the next
+  legitimate run at the monthly cap. Charging now follows an invocation callback: zero for preparation
+  and allocation failures and for an OS launch refusal, one per launched child including timeouts and
+  non-zero exits.
+  Verification: 590 tests passed in the project venv (18 new cases in `tests/test_preview_inputs.py` plus
+  the dry-path cases); four of those fail against the pre-fix source with changed canonical hashes and
+  `assert 8 == 0`. Ruff clean. Two fresh-session read-only audits: the first raised the input-isolation
+  and spend findings above, the second returned no actionable findings and confirmed the canonical pair,
+  delivered brief, claims ledger and retained archives are byte-identical after both successful and
+  failed previews. The README's `--dry` wording still says nothing reaches Discord, which was already
+  untrue for failure alerts before this change; unchanged here.
+
 ## 2026-11-21
 
 ### Added
@@ -31,8 +56,7 @@ version numbers; entries are dated.
 
 - Two read-only audits; the second ran on a different model and returned no actionable findings. Residuals are
   fitted, not independent calibration data; partial-session extrema and vendor continuous-contract provenance
-  remain limitations. A `--dry` run currently rewrites an archived brief — tracked in the workspace worklist,
-  not fixed here.
+  remain limitations. The `--dry` run that rewrote an archived brief was fixed on 2026-11-22 (see above).
 
 ## 2026-11-20
 
