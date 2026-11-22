@@ -125,3 +125,18 @@ def test_deliver_only_dry_reuses_archive_without_composing(preview, capsys):
     process.assert_not_called()
     send.assert_not_called()
     alert.assert_not_called()
+
+
+def test_preview_creation_failure_keeps_compose_exit_code(preview, monkeypatch):
+    process, send, alert = preview
+    out = config.BRIEFS / f"{DATE}.md"
+    claims = config.STATE / f"claims-{DATE}.json"
+    out.write_bytes(b"already delivered")
+    claims.write_bytes(b"[]\n")
+    before = digest(out), digest(claims)
+    monkeypatch.setattr(R.tempfile, "mkdtemp", Mock(side_effect=OSError("synthetic failure")))
+    assert R.main(FLAGS) == 4
+    assert (digest(out), digest(claims)) == before
+    process.assert_not_called()
+    send.assert_not_called()
+    alert.assert_called_once()

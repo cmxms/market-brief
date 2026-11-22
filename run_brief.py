@@ -271,8 +271,13 @@ def _run(argv: list[str] | None, state: dict) -> int:
             if args.dry:
                 # Reserve this preview's own namespace, never the delivered archive.
                 attempts = config.STATE / "compose-attempts"
-                attempts.mkdir(parents=True, exist_ok=True)
-                preview = Path(tempfile.mkdtemp(prefix="preview-", dir=attempts))
+                try:
+                    attempts.mkdir(parents=True, exist_ok=True)
+                    preview = Path(tempfile.mkdtemp(prefix="preview-", dir=attempts))
+                except OSError as exc:
+                    _record_spend(date, per_run)
+                    _log(f"compose failed: preview creation ({type(exc).__name__})", fh)
+                    return 4
                 out = preview / "brief.md"
                 claims_path = preview / "claims.json"
                 compose_options["claims_out"] = claims_path
