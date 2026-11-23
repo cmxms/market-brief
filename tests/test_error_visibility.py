@@ -74,7 +74,53 @@ def test_source_failure_is_typed_for_chain_fallback(monkeypatch, operation, labe
         operation()
     assert str(caught.value).startswith(f"{label} unavailable")
     assert "synthetic request detail" not in str(caught.value)
-    assert "https://" not in str(caught.value)
+    if label == "Cboe VIX" and failure == "http":
+        assert str(caught.value) == "Cboe VIX unavailable: HTTP 503 at https://example.invalid"
+    else:
+        assert "https://" not in str(caught.value)
+
+
+@pytest.mark.parametrize("status", [200, 204, 503])
+@pytest.mark.parametrize("final", [
+    "https://example.invalid/moved/VIX_History.csv",
+    # Synthetic credentials and signing token, never real access material.
+    "https://synthetic-user:synthetic-password@example.invalid/moved/VIX_History.csv"
+    "?X-Amz-Signature=synthetic-signature#synthetic-fragment",
+])
+def test_cboe_fetch_follows_redirect_and_reports_final_url(monkeypatch, status, final):
+    initial = "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
+    sanitized = "https://example.invalid/moved/VIX_History.csv"
+    seen = []
+
+    def transport(request):
+        seen.append(str(request.url))
+        if str(request.url) == initial:
+            return httpx.Response(307, headers={"Location": final})
+        assert str(request.url) == final
+        # Synthetic CSV, not an observed market close.
+        return httpx.Response(status, text="DATE,OPEN,HIGH,LOW,CLOSE\n01/02/2026,10,12,9,11\n")
+
+    with httpx.Client(transport=httpx.MockTransport(transport)) as client:
+        monkeypatch.setattr(G.httpx, "get", client.get)
+        if status == 200:
+            assert G._cboe_index("VIX") == [("2026-01-02", 11.0)]
+        else:
+            with pytest.raises(G.SourceUnavailable) as caught:
+                G._cboe_index("VIX")
+            message = str(caught.value)
+            assert message == f"Cboe VIX unavailable: HTTP {status} at {sanitized}"
+            for private in ("synthetic-user", "synthetic-password", "X-Amz-Signature",
+                            "synthetic-signature", "synthetic-fragment", "?", "#", "@"):
+                assert private not in message
+    assert seen == [initial, final]
+
+
+def test_cboe_failure_destination_falls_back_without_absolute_url(monkeypatch):
+    response = httpx.Response(503, request=httpx.Request("GET", "/private?synthetic-token#fragment"))
+    monkeypatch.setattr(httpx, "get", Mock(return_value=response))
+    with pytest.raises(G.SourceUnavailable) as caught:
+        G._cboe_index("VIX")
+    assert str(caught.value) == "Cboe VIX unavailable: HTTP 503 at unknown destination"
 
 
 @pytest.mark.parametrize("csv_text", ["Date,2 Yr\nbad,4.0\n", "Date,2 Yr\n11/16/2026,bad\n"])

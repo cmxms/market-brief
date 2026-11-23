@@ -138,7 +138,7 @@ VOL_TICKERS = {"^VIX": "VIX (30d)", "^VIX9D": "VIX9D (9d)"}
 # Cboe publishes each index's full daily history as a keyless CSV on its own CDN.
 # 🔴 These publish AFTER THE CLOSE, so pre-open the newest row is the PRIOR session. That is
 # why the CNBC leg stays: Cboe is the official number, CNBC is the live one.
-CBOE_INDEX_CSV = "https://cdn.cboe.com/api/global/us_indices/daily_prices/{symbol}_History.csv"
+CBOE_INDEX_CSV = "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/{symbol}_History.csv"
 # Ordered by horizon — reading them together IS the term structure, no interpolation needed.
 CBOE_INDICES = {"VIX9D": "VIX9D (9d)", "VIX": "VIX (30d)",
                 "VIX3M": "VIX3M (3mo)", "VIX6M": "VIX6M (6mo)"}
@@ -692,10 +692,18 @@ def _cboe_index(symbol: str, tail: int = CBOE_LOOKBACK + 5) -> list[tuple[str, f
     """
     try:
         r = httpx.get(CBOE_INDEX_CSV.format(symbol=symbol),
-                      headers={"User-Agent": "Mozilla/5.0"}, timeout=25)
-        r.raise_for_status()
+                      headers={"User-Agent": "Mozilla/5.0"}, timeout=25, follow_redirects=True)
     except httpx.HTTPError as exc:
         raise SourceUnavailable(f"Cboe {symbol} unavailable: {_failure_reason(exc)}") from None
+    if r.status_code != 200:
+        destination = "unknown destination"
+        try:
+            if r.url.scheme in ("http", "https") and r.url.host:
+                destination = str(r.url.copy_with(username=None, password=None, port=None,
+                                                  query=None, fragment=None))
+        except (httpx.InvalidURL, ValueError, TypeError):
+            pass  # Retain the constant fallback; never report the original URL.
+        raise SourceUnavailable(f"Cboe {symbol} unavailable: HTTP {r.status_code} at {destination}")
     rows = []
     rd = csv.reader(io.StringIO(r.text))
     try:
@@ -742,7 +750,7 @@ def cboe_vol_official() -> dict:
         dates.append(d)
 
     out = {
-        "source": "Cboe official close (cdn.cboe.com daily index CSVs)",
+        "source": "Cboe official close (cdn-api.cboe.com daily index CSVs)",
         "as_of": levels["VIX"]["date"],
         "levels": levels,
         "aligned": len(set(dates)) == 1,
