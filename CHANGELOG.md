@@ -4,6 +4,29 @@ Notable changes to market-brief, newest first. Format follows
 [Keep a Changelog](https://keepachangelog.com/). This project does not publish
 version numbers; entries are dated.
 
+## 2026-11-23
+
+### Fixed
+
+- **Cboe's vol curve works again, after two sessions dark.** Cboe moved its CDN: `cdn.cboe.com` answers
+  `307` and points at `cdn-api.cboe.com`. The fetch neither followed redirects nor treated the redirect as
+  failure in a way that said so, so every leg of the official curve was unavailable on 2026-11-20 and
+  2026-11-23. That is what cost the `## 📈` section its content: with `vol_official` unverifiable, the
+  quarantine replaced the whole section — yields, oil and the HAR line with it — and published a raw error
+  string. The fetch now targets the host that answers, follows redirects so a future move degrades instead
+  of vanishing, and raises `SourceUnavailable` on any non-200. Verified live: the last row parses as
+  `2026-11-20, 35.89`.
+- **The failure message names a destination without being able to leak one.** Interpolating `r.url` was a
+  disclosure path: `str(httpx.URL)` does not mask credentials, so a redirect to a signed URL followed by a
+  non-200 would have written the token into the data block and the log. The message now reports scheme,
+  host and path only, and falls back to "unknown destination" rather than ever printing the original URL.
+
+### Known gaps
+
+- The CSV parser is permissive (header not validated, extra columns ignored, malformed quoting can absorb
+  rows). Pre-existing, not introduced here, and still able to accept an incomplete curve where it should
+  report one unavailable. Raised by audit; not fixed.
+
 ## 2026-11-22
 
 ### Fixed
