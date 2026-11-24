@@ -30,6 +30,9 @@ BANNER = ("⚠ STALE DATA — pulled 2026-11-19 09:20 ET; sending 2026-11-19 09:
 
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch, tmp_path):
+    data_warning = R._data_warning
+    monkeypatch.setattr(R, "_data_warning", lambda payload, now=None: data_warning(
+        payload, now if now is not None else P._now_et()))
     for name in ("DATA", "STATE", "BRIEFS", "LOGS", "PROJECT"):
         monkeypatch.setattr(config, name, tmp_path)
     monkeypatch.setattr(config, "ensure_dirs", lambda: None)
@@ -52,6 +55,8 @@ def isolated(monkeypatch, tmp_path):
     payload = {"run_id": "a" * 32, "as_of_et": STAMP, "event_gate": {"today_events": [], "today_tier2": []},
                "gex": {s: {v: {"regime": "positive"} for v in ("near_term", "full_chain")}
                        for s in ("SPY", "QQQ")}}
+    for quote in payload["gex"].values():
+        quote.update(spot=100, spot_time="2026-11-19T09:20:00-05:00", spot_source="Tradier last")
     (tmp_path / f"{DATE}.json").write_text(json.dumps(payload), encoding="utf-8")
     (tmp_path / f"{DATE}.md").write_text(BRIEF, encoding="utf-8")
     (tmp_path / f"{DATE}.data.md").write_text("-# Run: " + "a" * 32, encoding="utf-8")

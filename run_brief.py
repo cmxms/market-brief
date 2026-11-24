@@ -51,11 +51,12 @@ def _write_log(msg: str, fh) -> None:
     fh.flush()
 
 
-def _data_warning(payload: dict) -> str | None:
+def _data_warning(payload: dict, now: dt.datetime | None = None) -> str | None:
     gex = payload.get("gex")
     if not isinstance(gex, dict) or not gex:
         return "GEX unavailable: missing chains"
     failures = []
+    now = now if now is not None else dt.datetime.now(ET)
     for symbol in dict.fromkeys(("SPY", "QQQ", *gex)):
         views = gex.get(symbol)
         if not isinstance(views, dict) or not views:
@@ -64,6 +65,9 @@ def _data_warning(payload: dict) -> str | None:
         if views.get("error") or views.get("data_warning"):
             failures.append(f"{symbol} GEX unavailable: {views.get('error') or views['data_warning']}")
             continue
+        spot_reason = validate.gex_spot_reason(views, now)
+        if spot_reason:
+            failures.append(f"{symbol} GEX unavailable: {spot_reason}")
         for view in ("near_term", "full_chain"):
             block = views.get(view)
             reason = (block.get("error") or block.get("data_warning")) if isinstance(block, dict) else None

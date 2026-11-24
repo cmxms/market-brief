@@ -354,9 +354,29 @@ def test_compose_inserts_exact_line_before_validation(composer, monkeypatch, lin
     assert ok, detail
     brief = out.read_text(encoding="utf-8")
     assert brief.count(line) == 1
+    assert "\n- " + line + "\n" in brief
     assert brief.index("## 📈") < brief.index(line) < brief.index("## 🚨")
     prompt_path = Path(process.call_args.args[0][3])
     assert "parent inserts it" in prompt_path.read_text(encoding="utf-8")
+
+
+def test_compose_missing_estimate_fallback_is_a_bullet(composer, monkeypatch):
+    run, process, out, _ = composer
+    monkeypatch.setenv("MARKET_BRIEF_HAR_ENABLED", "1")
+
+    def writer(cmd, **kwargs):
+        candidate, claims, marker = outputs(cmd)
+        candidate.write_text(BODY + "\n" + marker, encoding="utf-8")
+        claims.write_text("[]", encoding="utf-8")
+        return Mock(returncode=0, stdout="", stderr="")
+
+    process.side_effect = writer
+    ok, detail = run()
+    assert ok, detail
+    line = "- Volatility (HAR, NQ): omitted — no estimate in this session's data block"
+    brief = out.read_text(encoding="utf-8")
+    assert "\n" + line + "\n" in brief
+    assert brief.index("## 📈") < brief.index(line) < brief.index("## 🚨")
 
 
 def test_percentile_is_causal_and_requires_100_prior_values(source, monkeypatch):

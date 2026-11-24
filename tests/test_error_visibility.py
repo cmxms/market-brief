@@ -173,6 +173,7 @@ def test_sector_failure_cannot_become_partial_ranking(monkeypatch, block, failed
 
 
 def test_chain_timeout_withholds_gamma_in_rendered_block(monkeypatch, block):
+    monkeypatch.setattr(G.yf, "download", lambda *a, **kw: G.pd.DataFrame())
     monkeypatch.setattr(G, "_quote", lambda _: {"last": 100})
     monkeypatch.setattr(G, "_expirations", lambda _: ["2026-11-20"])
     monkeypatch.setattr(G, "_chain", Mock(side_effect=httpx.ReadTimeout("timeout")))

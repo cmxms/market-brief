@@ -30,6 +30,9 @@ BRIEF = BRIEF.rstrip() + "\n-# Run: " + "a" * 32
 
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch, tmp_path):
+    data_warning = R._data_warning
+    monkeypatch.setattr(R, "_data_warning", lambda payload, now=None: data_warning(
+        payload, now if now is not None else P._now_et()))
     for name in ("PROJECT", "DATA", "STATE", "BRIEFS", "LOGS"):
         monkeypatch.setattr(config, name, tmp_path)
     monkeypatch.setattr(config, "ensure_dirs", lambda: None)
@@ -56,6 +59,8 @@ def isolated(monkeypatch, tmp_path):
                "event_gate": {"today_events": [], "today_tier2": []},
                "gex": {s: {v: {"regime": "positive"} for v in ("near_term", "full_chain")}
                        for s in ("SPY", "QQQ")}}
+    for quote in payload["gex"].values():
+        quote.update(spot=100, spot_time="2026-11-20T08:35:00-05:00", spot_source="Tradier last")
     return tmp_path, payload, send
 
 

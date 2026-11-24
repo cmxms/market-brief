@@ -26,12 +26,17 @@ BRIEF = BODY.replace("Sat November 14, 2026", DISPLAY).replace(
 
 
 def healthy_gex():
-    return {s: {v: {"regime": "positive", "data_warning": None}
-                for v in ("near_term", "full_chain")} for s in ("SPY", "QQQ")}
+    return {s: {"spot": 100, "spot_time": "2026-11-19T08:35:00-05:00",
+                "spot_source": "Tradier last",
+                **{v: {"regime": "positive", "data_warning": None}
+                   for v in ("near_term", "full_chain")}} for s in ("SPY", "QQQ")}
 
 
 @pytest.fixture
 def isolated(monkeypatch, tmp_path):
+    data_warning = R._data_warning
+    monkeypatch.setattr(R, "_data_warning", lambda payload: data_warning(
+        payload, dt.datetime(2026, 11, 19, 8, 36, tzinfo=ET)))
     monkeypatch.setattr(P, "alert_failure", Mock())
     for name in ("DATA", "STATE", "BRIEFS", "LOGS", "PROJECT"):
         monkeypatch.setattr(config, name, tmp_path)
@@ -203,7 +208,7 @@ def test_historical_disclosed_without_claim_passes():
 
 def test_historical_unaffected_brief_passes():
     assert check(historical(), None) == ([], [])
-    assert R._data_warning({"gex": healthy_gex()}) is None
+    assert R._data_warning({"gex": healthy_gex()}, dt.datetime(2026, 11, 19, 8, 36, tzinfo=ET)) is None
 
 
 @pytest.mark.parametrize("claim", [

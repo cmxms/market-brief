@@ -1257,6 +1257,35 @@ def _ms_to_et(ms):
         return None
 
 
+def _premarket_spot(symbol: str, today: dt.date, now=None) -> dict:
+    """Select the newest current-session Yahoo pre/post bar, at most 30 minutes old.
+
+    Yahoo covers 04:00–20:00 ET, not overnight. Reject naive timestamps rather
+    than guessing a timezone, and never substitute a prior close.
+    """
+    now = now if now is not None else pd.Timestamp.now(tz="America/New_York")
+    frame = yf.download(symbol, period="2d", interval="1m", prepost=True,
+                        progress=False, auto_adjust=False, threads=False)
+    if frame is None or frame.empty:
+        raise SourceUnavailable("missing premarket print: empty yfinance frame")
+    if getattr(frame.index, "tz", None) is None:
+        raise SourceUnavailable("missing premarket print: yfinance timestamp has no timezone")
+    close = _close_series(frame).sort_index()
+    close.index = close.index.tz_convert("America/New_York")
+    close = close[(close.index.date == today) & (close.index.time >= dt.time(4))
+                  & (close.index.time < dt.time(20)) & (close.index <= now)]
+    close = close[np.isfinite(close) & (close > 0)]
+    if close.empty:
+        raise SourceUnavailable("missing premarket print: no valid current-session yfinance bar")
+    result = {"last": float(close.iloc[-1]), "spot_time": close.index[-1].isoformat(),
+              "spot_source": "yfinance 1m prepost"}
+    import validate
+    reason = validate.gex_spot_reason({"spot": result["last"], **result}, now)
+    if reason:
+        raise SourceUnavailable(reason)
+    return result
+
+
 def gex_tradier(today: dt.date) -> dict:
     """Front-dated + full-chain GEX for SPY+QQQ from the live Tradier chain.
     NOTE: pre-market this reflects the PRIOR session's IV/greeks (options don't
@@ -1271,9 +1300,25 @@ def gex_tradier(today: dt.date) -> dict:
         stage = "Tradier spot quote (near-term and full-chain views)"
         try:
             q = _quote(sym)
+            if not isinstance(q, dict):
+                raise TypeError("missing Tradier chain spot")
             spot_source = "last" if q.get("last") else "close"
             spot = float(q.get("last") or q.get("close"))
             spot_time = _ms_to_et(q.get("trade_date"))
+            if not np.isfinite(spot) or spot <= 0:
+                raise ValueError("invalid Tradier chain spot")
+            failures = []
+            now = pd.Timestamp.now(tz="America/New_York")
+            comparison = _attempt("yfinance premarket", lambda sym=sym: _premarket_spot(sym, today, now), failures)
+            if q.get("last"):
+                candidate = {"spot": q["last"], "spot_time": spot_time,
+                             "spot_source": "Tradier last"}
+                import validate
+                if not validate.gex_spot_reason(candidate, now):
+                    # Equal timestamps retain Yahoo; source priority never beats a newer print.
+                    if not comparison or pd.Timestamp(spot_time) > pd.Timestamp(comparison["spot_time"]):
+                        comparison = {"last": float(candidate["spot"]), "spot_time": spot_time,
+                                      "spot_source": candidate["spot_source"]}
             stage = "Tradier expirations (near-term and full-chain views)"
             exps = sorted(_expirations(sym))
             if not exps:
@@ -1296,9 +1341,13 @@ def gex_tradier(today: dt.date) -> dict:
                     return {"error": f"Tradier chain computation failed: {type(exc).__name__}"}
 
             res = {
-                "spot": round(spot, 2),
-                "spot_source": spot_source,
-                "spot_time": spot_time,
+                "chain_spot": round(spot, 2),
+                "chain_spot_source": "Tradier " + spot_source,
+                "chain_spot_time": spot_time,
+                "spot": round(comparison["last"], 2) if comparison else None,
+                "spot_source": comparison.get("spot_source") or None,
+                "spot_time": comparison.get("spot_time") or None,
+                "spot_failures": failures,
                 "near_term": compute_view(near_opts, spot, len(near_exps), near_failed, ctx)
                     | {"expirations": near_exps, "n_expirations": len(near_exps)},
                 "full_chain": compute_view(full_opts, spot, len(exps), failed, ctx)
@@ -1721,6 +1770,11 @@ def render_md(d: dict) -> str:
              f"full-chain = every listed expiration (structural flip)")
     for sym in GEX_SYMBOLS:
         v = d["gex"].get(sym, {})
+        if v and not v.get("error"):
+            L.append(f"- {sym} chain spot: {v.get('chain_spot', v.get('spot'))} "
+                     f"({v.get('chain_spot_source', v.get('spot_source')) or 'source unknown'} "
+                     f"@ {v.get('chain_spot_time', v.get('spot_time')) or 'time unknown'}); "
+                     "chain diagnostic only, not the comparison spot")
         if v.get("error") or v.get("data_warning"):
             L.append(blocked(sym, v.get("error") or v["data_warning"])); continue
         nt, fc = v.get("near_term") or {}, v.get("full_chain") or {}
@@ -1736,6 +1790,10 @@ def render_md(d: dict) -> str:
             L.append(f"    {sym}: GEX {label} view unavailable — {reason}{shown}")
             L.append(f"    do not write a regime call, a flip, or walls for the {label} view")
         if len(unavailable) == 2:
+            continue
+        spot_reason = validate.gex_spot_reason(v, pd.Timestamp.now(tz="America/New_York"))
+        if spot_reason:
+            L.append(blocked(sym + " gamma read", spot_reason))
             continue
         L.append(f"- {sym}: spot {v['spot']} ({v.get('spot_source') or 'source unknown'} "
                  f"@ {v.get('spot_time') or 'time unknown'})")

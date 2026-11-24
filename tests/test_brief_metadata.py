@@ -91,6 +91,9 @@ def test_playbook_title_date_at_both_gates(composer, monkeypatch, day, weekday, 
         ok, detail = C.run(date, config.STATE / "data.md", out, log)
         assert ok, detail
     else:
+        now = dt.datetime.fromisoformat("2026-11-14T08:00:00-05:00")
+        data_warning = R._data_warning
+        monkeypatch.setattr(R, "_data_warning", lambda payload: data_warning(payload, now))
         monkeypatch.setattr(config, "ensure_dirs", lambda: None)
         monkeypatch.setattr(config, "load_env", lambda: None)
         monkeypatch.setattr(config, "DATA", config.STATE)
@@ -99,7 +102,8 @@ def test_playbook_title_date_at_both_gates(composer, monkeypatch, day, weekday, 
         (config.DATA / f"{date}.json").write_text(json.dumps({
             "run_id": "a" * 32,
             "as_of_et": "Sat Nov 14, 2026 8:00 AM ET",
-            "gex": {s: {v: {"regime": "positive"} for v in ("near_term", "full_chain")}
+            "gex": {s: {"spot": 100, "spot_time": now.isoformat(), "spot_source": "Tradier last",
+                        **{v: {"regime": "positive"} for v in ("near_term", "full_chain")}}
                     for s in ("SPY", "QQQ")},
         }), encoding="utf-8")
         # Exercise validation and real chunking, never a delivery transport.

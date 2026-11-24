@@ -8,6 +8,25 @@ version numbers; entries are dated.
 
 ### Fixed
 
+- **The gamma comparison is priced off a current print, not Friday's close.** On 2026-11-23 the
+  brief compared `spot 689.81` — the 2026-11-20 close — to a flip level at 706 and called the regime
+  "amplify mode" while SPY opened at 724.33 and traded 713.53–727.98, so its one structural claim was
+  inverted. The comparison print is acquired **during gathering**, selecting the newest valid timestamp
+  across Yahoo pre/post bars and Tradier last trades, not preferring Yahoo over a newer Tradier print.
+  Both use the same current-session rule (04:00–20:00 ET, premarket included) and 30-minute age limit.
+  The selected print is re-validated against session and age at composition and before delivery.
+  Retained blocks reused without gathering (`--skip-gather` or `--deliver-only`) are bounded by that
+  age check rather than refreshed; a newer print may exist. Composition makes no spot-fetch call.
+  Prior-session, undated, future and over-age prints are rejected, and with no valid print the comparison is
+  withheld and the warning names it. A prior close and a futures-implied level are never substituted.
+  The chain's own spot, source and time stay as labelled diagnostics and the chain arithmetic still
+  uses the chain spot. Separately, the retained HAR line keeps its bullet marker, including the
+  missing-estimate fallback.
+  Verification: `python -m pytest -q` — 640 passed; a live yfinance call at 18:58 ET returned a print
+  12.6 seconds old where the earlier rule returned a nine-hour-old one. Only `gex_spot_reason()` was
+  added to validation; quarantine behaviour is unchanged.
+  Audit follow-up verification: `python -m pytest -q` — 661 passed; synthetic selection regressions
+  confirm Tradier at 08:34 beats Yahoo at 08:30, and Yahoo wins when Tradier is older.
 - **Cboe's vol curve works again, after two sessions dark.** Cboe moved its CDN: `cdn.cboe.com` answers
   `307` and points at `cdn-api.cboe.com`. The fetch neither followed redirects nor treated the redirect as
   failure in a way that said so, so every leg of the official curve was unavailable on 2026-11-20 and

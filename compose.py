@@ -100,9 +100,9 @@ def run(date: str, data_md: Path, out: Path, log_path: Path,
         matches = re.findall(r"^- (Volatility \(HAR, NQ\): .+)$", block_text, re.MULTILINE)
         if (len(matches) == 1 and block_text.startswith(f"# BRIEF DATA BLOCK — {date}\n")
                 and re.fullmatch(r"Volatility \(HAR, NQ\): (?:~\d+ pts expected range \(10–90: \d+–\d+\)(?: — outside training range)?|omitted — [\w (),.-]+)", matches[0])):
-            har_line = matches[0]
+            har_line = "- " + matches[0]
         else:
-            har_line = "Volatility (HAR, NQ): omitted — no estimate in this session's data block"
+            har_line = "- Volatility (HAR, NQ): omitted — no estimate in this session's data block"
     # Never expose an old enabled block's line to a flag-off writer.
     block_text = re.sub(r"^- Volatility \(HAR, NQ\): .*\n?", "", block_text, flags=re.MULTILINE)
     if run_id is not None:

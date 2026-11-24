@@ -22,6 +22,9 @@ FLAGS = ["--date", DATE, "--skip-gather", "--dry", "--ignore-window", "--force-w
 
 @pytest.fixture
 def preview(composer, monkeypatch):
+    now = R.dt.datetime.fromisoformat("2026-11-14T08:00:00-05:00")
+    data_warning = R._data_warning
+    monkeypatch.setattr(R, "_data_warning", lambda payload: data_warning(payload, now))
     _, process, _, _ = composer
     briefs = config.STATE / "briefs"
     briefs.mkdir()
@@ -41,6 +44,8 @@ def preview(composer, monkeypatch):
     payload = {"run_id": ID, "as_of_et": "Sat Nov 14, 2026 8:00 AM ET",
                "gex": {s: {v: {"regime": "positive"} for v in ("near_term", "full_chain")}
                        for s in ("SPY", "QQQ")}}
+    for quote in payload["gex"].values():
+        quote.update(spot=100, spot_time=now.isoformat(), spot_source="Tradier last")
     (config.DATA / f"{DATE}.json").write_text(json.dumps(payload), encoding="utf-8")
     (config.DATA / f"{DATE}.data.md").write_text("-# Run: " + ID, encoding="utf-8")
 

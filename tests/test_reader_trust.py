@@ -65,6 +65,10 @@ def test_every_collected_headline_is_rendered(block, section, count):
 
 @pytest.mark.parametrize("failed", ["2026-11-19", "2026-12-18"])
 def test_failed_expiry_names_affected_views(monkeypatch, block, failed):
+    now = G.pd.Timestamp("2026-11-17T06:00:00-05:00")
+    monkeypatch.setattr(G.pd.Timestamp, "now", lambda **kw: now)
+    monkeypatch.setattr(G, "_premarket_spot", lambda *a: {
+        "last": 100, "spot_time": now.isoformat(), "spot_source": "yfinance 1m prepost"})
     exps = ["2026-11-19", "2026-11-20", "2026-11-23", "2026-11-24", "2026-12-18"]
     monkeypatch.setattr(G, "_quote", lambda _: {"last": 100})
     monkeypatch.setattr(G, "_expirations", lambda _: exps)
@@ -148,6 +152,7 @@ def test_macro_retains_selected_samples(monkeypatch):
 
 @pytest.mark.parametrize("missing", ["near_term", "full_chain"])
 def test_gex_computation_failure_is_isolated_and_named(monkeypatch, block, missing):
+    monkeypatch.setattr(G.yf, "download", lambda *a, **kw: G.pd.DataFrame())
     exps = ["2026-11-19", "2026-11-20", "2026-11-23", "2026-11-24", "2026-12-18"]
     monkeypatch.setattr(G, "_quote", lambda _: {"last": 100})
     monkeypatch.setattr(G, "_expirations", lambda _: exps)
