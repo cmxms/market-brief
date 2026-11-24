@@ -1304,16 +1304,17 @@ def gex_tradier(today: dt.date) -> dict:
                 raise ValueError("invalid Tradier chain spot")
             failures = []
             now = pd.Timestamp.now(tz="America/New_York")
-            comparison = _attempt("yfinance premarket", lambda sym=sym: _premarket_spot(sym, today, now), failures)
+            comparison = _attempt("yfinance premarket", lambda sym=sym, now=now: _premarket_spot(sym, today, now), failures)
             if q.get("last"):
                 candidate = {"spot": q["last"], "spot_time": spot_time,
                              "spot_source": "Tradier last"}
                 import validate
-                if not validate.gex_spot_reason(candidate, now):
-                    # Equal timestamps retain Yahoo; source priority never beats a newer print.
-                    if not comparison or pd.Timestamp(spot_time) > pd.Timestamp(comparison["spot_time"]):
-                        comparison = {"last": float(candidate["spot"]), "spot_time": spot_time,
-                                      "spot_source": candidate["spot_source"]}
+                # Equal timestamps retain Yahoo; source priority never beats a newer print.
+                if not validate.gex_spot_reason(candidate, now) and (
+                    not comparison or pd.Timestamp(spot_time) > pd.Timestamp(comparison["spot_time"])
+                ):
+                    comparison = {"last": float(candidate["spot"]), "spot_time": spot_time,
+                                  "spot_source": candidate["spot_source"]}
             stage = "Tradier expirations (near-term and full-chain views)"
             exps = sorted(_expirations(sym))
             if not exps:

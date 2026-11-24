@@ -84,8 +84,8 @@ def test_source_failure_is_typed_for_chain_fallback(monkeypatch, operation, labe
 @pytest.mark.parametrize("final", [
     "https://example.invalid/moved/VIX_History.csv",
     # Synthetic credentials and signing token, never real access material.
-    "https://synthetic-user:synthetic-password@example.invalid/moved/VIX_History.csv"
-    "?X-Amz-Signature=synthetic-signature#synthetic-fragment",
+    ("https://synthetic-user:synthetic-password@example.invalid/moved/VIX_History.csv"
+     "?X-Amz-Signature=synthetic-signature#synthetic-fragment"),
 ])
 def test_cboe_fetch_follows_redirect_and_reports_final_url(monkeypatch, status, final):
     initial = "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
