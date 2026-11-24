@@ -52,17 +52,16 @@ shaped. This file is the operating contract around it.
   with a non-zero exit code.
 
 Gamma comparison prints are acquired **when data is gathered**, not during composition.
-Gathering selects the newest valid timestamp across the yfinance one-minute pre/post bar and
-the Tradier last trade, premarket or regular hours. Both must satisfy the same **current-session**
-rule (04:00–20:00 ET) and **30-minute** age limit. The selected print is re-validated against
-session and age at composition and before delivery. A prior-session print, an undated one, a
-future one, or anything older than 30 minutes is rejected outright — neither a prior close nor
-a futures-implied level is substituted. Routes that reuse a retained block without gathering
-(`--skip-gather` or `--deliver-only`) are bounded by that age check, not refreshed, so a newer
-print may exist even while the retained print passes. Composition makes no spot-fetch call.
-The chain's own spot and timestamp remain separate diagnostic fields, and chain arithmetic
-still uses that chain spot. Without a valid comparison print the gamma comparison is withheld
-and its warning names the missing print.
+Gathering takes the newest dated print across the yfinance one-minute pre/post bar and the
+Tradier last trade — whichever timestamp is later, ties to Yahoo — with no session window and no
+age limit: the brief runs once, premarket, and the price in force then is the one it uses. The
+time travels with the number, and a print dated before the current ET session is labelled a
+**prior close** rather than presented as live. Only an undated print is refused, and with no
+dated print the gamma comparison is withheld with its reason. Neither a prior close nor a
+futures-implied level is ever substituted silently. Routes that reuse a retained block without
+gathering (`--skip-gather` or `--deliver-only`) carry that block's own print and its time.
+Composition makes no spot-fetch call. The chain's own spot and timestamp remain separate
+diagnostic fields, and chain arithmetic still uses that chain spot.
 
 ## Requirements
 

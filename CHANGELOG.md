@@ -6,6 +6,16 @@ version numbers; entries are dated.
 
 ## 2026-11-23
 
+### Changed
+
+- **The comparison spot is simply the newest print at run time, labelled with its time.** The
+  30-minute age limit and the 04:00–20:00 ET session window are gone: the brief runs once, at 07:35
+  CT, so the price in force at that moment is the one it uses, chosen from the yfinance one-minute
+  pre/post bar and the dated Tradier last trade by later timestamp. A print dated before the current
+  session is labelled a **prior close** rather than presented as live, and only an undated print is
+  refused. Rationale: the age rule could only ever withhold a real price, and the owner's rule is that
+  the run takes what the source has.
+
 ### Fixed
 
 - **The gamma comparison is priced off a current print, not Friday's close.** On 2026-11-23 the

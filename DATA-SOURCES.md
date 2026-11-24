@@ -110,16 +110,15 @@ wall and put wall are computed locally from the chain — not fetched from anyon
 
 The comparison spot is separate from the chain's diagnostic spot and is acquired **during
 gathering**, not composition. Gathering considers both the newest yfinance one-minute pre/post
-bar and the dated Tradier last trade, validates each against the same current-session rule
-(04:00–20:00 ET) and 30-minute age limit, and selects the most recent valid timestamp. If only
-one is valid, it wins; equal timestamps retain Yahoo. Empty, undated, future, prior-session and
-over-age prints cannot supply a comparison, nor can a prior close or a futures-implied level.
-The selected print is re-validated against session and 30-minute age at composition and before
-delivery. Routes that reuse a retained block without gathering (`--skip-gather` or
-`--deliver-only`) are bounded by that age check rather than refreshed; a newer print may exist.
-Composition makes no spot-fetch call. Without a valid print the gamma comparison is withheld
-and the warning names the missing print. The chain spot, source and time stay labelled
-diagnostics, and the chain arithmetic still uses the chain spot.
+bar and the dated Tradier last trade and selects the later timestamp, ties to Yahoo. There is no
+session window and no age limit: the brief runs once, premarket, and the price in force at that
+moment is the one used. The time travels with the number, and a print dated before the current ET
+session is labelled a **prior close** rather than shown as live. Only an undated print is
+refused, and with no dated print the gamma comparison is withheld and the warning names the
+missing print. Routes that reuse a retained block without gathering (`--skip-gather` or
+`--deliver-only`) carry that block's own print and its time. Composition makes no spot-fetch
+call. The chain spot, source and time stay labelled diagnostics, and the chain arithmetic still
+uses the chain spot.
 
 **Incomplete-chain guard** (added 2026-08-02). A contract with no gamma or no open interest
 can't be used and is skipped. That's normally harmless, but if Tradier's greeks degrade, GEX is

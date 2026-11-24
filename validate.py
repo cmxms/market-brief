@@ -40,12 +40,7 @@ class DataIssue:
 
 
 def gex_spot_reason(quote: dict, now: dt.datetime) -> str | None:
-    """Require a current-session print no more than 30 minutes old.
-
-    Require the current ET session [04:00, 20:00), premarket included; reject
-    prior-session and future prints outright. Apply the same age limit to
-    Yahoo pre/post bars and Tradier last trades, including retained blocks.
-    """
+    """Require a real, dated comparison print; age and session are not gates."""
     import math
 
     try:
@@ -59,12 +54,11 @@ def gex_spot_reason(quote: dict, now: dt.datetime) -> str | None:
             raise ValueError
         stamp = stamp.astimezone(ZoneInfo("America/New_York"))
         now = now.astimezone(ZoneInfo("America/New_York"))
-        if (stamp.date() == now.date() and dt.time(4) <= stamp.time() < dt.time(20)
-                and dt.timedelta(0) <= now - stamp <= dt.timedelta(minutes=30)):
+        if stamp <= now:
             return None
     except (ValueError, TypeError, KeyError, OverflowError):
         pass
-    return "missing premarket print: no valid current-session comparison spot within 30 minutes"
+    return "missing premarket print: no valid dated comparison spot"
 
 
 def data_issues(payload: dict, gex_warning: str | None = None) -> list[DataIssue]:

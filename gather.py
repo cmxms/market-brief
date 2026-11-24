@@ -1258,11 +1258,7 @@ def _ms_to_et(ms):
 
 
 def _premarket_spot(symbol: str, today: dt.date, now=None) -> dict:
-    """Select the newest current-session Yahoo pre/post bar, at most 30 minutes old.
-
-    Yahoo covers 04:00–20:00 ET, not overnight. Reject naive timestamps rather
-    than guessing a timezone, and never substitute a prior close.
-    """
+    """Select the newest dated Yahoo pre/post bar available, regardless of age."""
     now = now if now is not None else pd.Timestamp.now(tz="America/New_York")
     frame = yf.download(symbol, period="2d", interval="1m", prepost=True,
                         progress=False, auto_adjust=False, threads=False)
@@ -1272,11 +1268,10 @@ def _premarket_spot(symbol: str, today: dt.date, now=None) -> dict:
         raise SourceUnavailable("missing premarket print: yfinance timestamp has no timezone")
     close = _close_series(frame).sort_index()
     close.index = close.index.tz_convert("America/New_York")
-    close = close[(close.index.date == today) & (close.index.time >= dt.time(4))
-                  & (close.index.time < dt.time(20)) & (close.index <= now)]
+    close = close[close.index <= now]
     close = close[np.isfinite(close) & (close > 0)]
     if close.empty:
-        raise SourceUnavailable("missing premarket print: no valid current-session yfinance bar")
+        raise SourceUnavailable("missing premarket print: no valid dated yfinance bar")
     result = {"last": float(close.iloc[-1]), "spot_time": close.index[-1].isoformat(),
               "spot_source": "yfinance 1m prepost"}
     import validate
@@ -1791,12 +1786,18 @@ def render_md(d: dict) -> str:
             L.append(f"    do not write a regime call, a flip, or walls for the {label} view")
         if len(unavailable) == 2:
             continue
-        spot_reason = validate.gex_spot_reason(v, pd.Timestamp.now(tz="America/New_York"))
+        spot_now = pd.Timestamp.now(tz="America/New_York")
+        spot_reason = validate.gex_spot_reason(v, spot_now)
         if spot_reason:
             L.append(blocked(sym + " gamma read", spot_reason))
             continue
-        L.append(f"- {sym}: spot {v['spot']} ({v.get('spot_source') or 'source unknown'} "
-                 f"@ {v.get('spot_time') or 'time unknown'})")
+        spot_stamp = dt.datetime.fromisoformat(v['spot_time']).astimezone(spot_now.tzinfo)
+        spot_label = ("prior close" if spot_stamp.date() < spot_now.date() else "last print")
+        spot_label += f" ({spot_stamp.strftime('%a %Y-%m-%d %H:%M')} ET)"
+        L.append(f"- {sym}: spot {v['spot']} — {spot_label} "
+                 f"({v.get('spot_source') or 'source unknown'} @ {v['spot_time']})")
+        L.append("    Keep this spot's time and prior-close label, if present, "
+                 "with the number in the comparison/regime text; age is not a withholding rule.")
         for label, view in views:
             if (label, view) in unavailable:
                 continue
